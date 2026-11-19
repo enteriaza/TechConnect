@@ -42,7 +42,7 @@ internal static class StatusCommand
             requireCa: true);
 
         Report(
-            "WSS server",
+            "TCP/mTLS server",
             StoreName.My,
             registry.ServerThumbprint,
             DevCertIdentities.ServerSubject,

@@ -59,6 +59,12 @@ public sealed class MainFormLifecycleTests
         UiReflection.GetPrivateField<ComboBox>(form, "_serialPortComboBox");
 
     /// <summary>
+    /// Reads the private VT console control via reflection.
+    /// </summary>
+    private static SerialTerminalControl ConsoleTerminal(MainForm form) =>
+        UiReflection.GetPrivateField<SerialTerminalControl>(form, "_consoleTerminal");
+
+    /// <summary>
     /// Polls a UI condition on the STA thread until true or timeout.
     /// </summary>
     private static async Task WaitForUiAsync(Func<bool> condition, string because, TimeSpan? timeout = null)
@@ -79,7 +85,7 @@ public sealed class MainFormLifecycleTests
 
     /// <summary>
     /// Scenario: construct MainForm with no ports.
-    /// Expected: ready message shown; Connect disabled.
+    /// Expected: ready message shown; Connect disabled; console panel blank.
     /// </summary>
     [Fact]
     public async Task Constructor_ShowsReadyMessage_AndConnectDisabledWithoutPorts()
@@ -92,6 +98,9 @@ public sealed class MainFormLifecycleTests
                 ErrorLabel(form).Text.Should().Be("Select a serial port and click Connect.");
                 ConnectButton(form).Enabled.Should().BeFalse();
                 ConnectButton(form).Text.Should().Be("Connect");
+                ConsoleTerminal(form).GetVisibleText().Trim().Should().BeEmpty();
+                ConsoleTerminal(form).HasReceivedOutput.Should().BeFalse();
+                ConsoleTerminal(form).GetVisibleText().Should().NotContain("console ready");
             }
         });
     }

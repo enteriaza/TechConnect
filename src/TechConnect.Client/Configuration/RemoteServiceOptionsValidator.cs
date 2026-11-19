@@ -17,10 +17,9 @@ namespace TechConnect.Client.Configuration;
 /// Startup validator for <see cref="RemoteServiceOptions"/>.
 /// </summary>
 /// <remarks>
-/// Empty <see cref="RemoteServiceOptions.Host"/> (and empty legacy BaseUrl) is allowed
-/// so the app can start before a remote endpoint is configured. When Host is set,
-/// port and placeholder-host checks apply. Does not log thumbprints in full or any
-/// private-key material.
+/// Empty <see cref="RemoteServiceOptions.Host"/> is allowed so the app can start before
+/// a remote endpoint is configured. When Host is set, port and placeholder-host checks
+/// apply. Does not log thumbprints in full or any private-key material.
 /// </remarks>
 public sealed class RemoteServiceOptionsValidator : IValidateOptions<RemoteServiceOptions>
 {
@@ -49,37 +48,10 @@ public sealed class RemoteServiceOptionsValidator : IValidateOptions<RemoteServi
                 failures.Add("RemoteService:Port must be between 1 and 65535 when Host is configured.");
             }
         }
-        else if (!string.IsNullOrWhiteSpace(options.BaseUrl))
-        {
-            // Legacy BaseUrl still binds for older files/tests; validate shape but prefer Host.
-            if (!Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var uri))
-            {
-                failures.Add("RemoteService:BaseUrl must be an absolute URI when provided.");
-            }
-            else if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-            {
-                failures.Add("RemoteService:BaseUrl must use the HTTPS scheme.");
-            }
-            else if (IsPlaceholderHost(uri.Host))
-            {
-                failures.Add("RemoteService:BaseUrl must not use a placeholder/example host.");
-            }
-        }
 
         if (!string.IsNullOrWhiteSpace(options.TlsHostName) && IsPlaceholderHost(options.TlsHostName))
         {
             failures.Add("RemoteService:TlsHostName must not use a placeholder/example host.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(options.WebSocketPath) &&
-            !options.WebSocketPath.StartsWith('/'))
-        {
-            failures.Add("RemoteService:WebSocketPath must be empty or begin with '/'.");
-        }
-
-        if (options.HeartbeatIntervalSeconds < 1)
-        {
-            failures.Add("RemoteService:HeartbeatIntervalSeconds must be at least 1.");
         }
 
         if (options.ConnectTimeoutSeconds < 1)

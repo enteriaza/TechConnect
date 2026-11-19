@@ -4,7 +4,7 @@
 //
 // Purpose:
 // WinForms designer-generated layout for MainForm: toolbar, status indicators,
-// traffic stats, error line, and read-only serial console text box.
+// traffic stats, error line, and VT100 serial console panel.
 //
 // -----------------------------------------------------------------------------
 
@@ -33,7 +33,7 @@ partial class MainForm
     /// <summary>Toggles the physical serial session (Connect / Disconnect).</summary>
     private Button _connectButton;
 
-    /// <summary>Clears the on-screen console buffer and text box.</summary>
+    /// <summary>Clears the on-screen console buffer and terminal display.</summary>
     private Button _clearConsoleButton;
 
     /// <summary>Runs the serial loopback diagnostic against the open COM port.</summary>
@@ -81,8 +81,8 @@ partial class MainForm
     /// <summary>Operator-facing status or error line above the console.</summary>
     private System.Windows.Forms.Label _errorLabel;
 
-    /// <summary>Read-only multiline console showing local serial RX text.</summary>
-    private System.Windows.Forms.TextBox _consoleTextBox;
+    /// <summary>VT100/ANSI terminal panel showing local serial RX.</summary>
+    private SerialTerminalControl _consoleTerminal;
 
     /// <summary>Root fill layout hosting toolbar, status, indicators, error, and console rows.</summary>
     private TableLayoutPanel _rootLayout;
@@ -146,7 +146,7 @@ partial class MainForm
         _rxIndicatorLabel = new System.Windows.Forms.Label();
         _statsLabel = new System.Windows.Forms.Label();
         _errorLabel = new System.Windows.Forms.Label();
-        _consoleTextBox = new System.Windows.Forms.TextBox();
+        _consoleTerminal = new SerialTerminalControl();
         _rootLayout.SuspendLayout();
         _toolbarLayout.SuspendLayout();
         _statusFlow.SuspendLayout();
@@ -161,7 +161,7 @@ partial class MainForm
         _rootLayout.Controls.Add(_statusFlow, 0, 1);
         _rootLayout.Controls.Add(_indicatorsFlow, 0, 2);
         _rootLayout.Controls.Add(_errorLabel, 0, 3);
-        _rootLayout.Controls.Add(_consoleTextBox, 0, 4);
+        _rootLayout.Controls.Add(_consoleTerminal, 0, 4);
         _rootLayout.Dock = System.Windows.Forms.DockStyle.Fill;
         _rootLayout.Location = new System.Drawing.Point(0, 0);
         _rootLayout.Name = "_rootLayout";
@@ -443,22 +443,17 @@ partial class MainForm
         _errorLabel.TabIndex = 3;
         _errorLabel.Text = "Select a serial port and click Connect.";
         // 
-        // _consoleTextBox
+        // _consoleTerminal
         // 
-        _consoleTextBox.BackColor = System.Drawing.Color.Black;
-        _consoleTextBox.Dock = System.Windows.Forms.DockStyle.Fill;
-        _consoleTextBox.Font = new System.Drawing.Font("Consolas", 10F);
-        _consoleTextBox.ForeColor = System.Drawing.Color.LightGray;
-        _consoleTextBox.HideSelection = false;
-        _consoleTextBox.Location = new System.Drawing.Point(15, 173);
-        _consoleTextBox.Multiline = true;
-        _consoleTextBox.Name = "_consoleTextBox";
-        _consoleTextBox.ReadOnly = true;
-        _consoleTextBox.ScrollBars = System.Windows.Forms.ScrollBars.Both;
-        _consoleTextBox.Size = new System.Drawing.Size(930, 452);
-        _consoleTextBox.TabIndex = 5;
-        _consoleTextBox.Text = ("[console ready]\r\nSerial TX/RX output will appear here in later phases.\r\nThis pane" + " is read-only.");
-        _consoleTextBox.WordWrap = false;
+        _consoleTerminal.BackColor = System.Drawing.Color.Black;
+        _consoleTerminal.Dock = System.Windows.Forms.DockStyle.Fill;
+        _consoleTerminal.Font = new System.Drawing.Font("Consolas", 10F);
+        _consoleTerminal.ForeColor = System.Drawing.Color.LightGray;
+        _consoleTerminal.Location = new System.Drawing.Point(15, 173);
+        _consoleTerminal.Name = "_consoleTerminal";
+        _consoleTerminal.Size = new System.Drawing.Size(930, 452);
+        _consoleTerminal.TabIndex = 5;
+        _consoleTerminal.TabStop = false;
         // 
         // MainForm
         // 

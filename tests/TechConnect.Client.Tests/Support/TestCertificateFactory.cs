@@ -18,7 +18,7 @@ namespace TechConnect.Client.Tests.Support;
 /// Certificates are materialized via PFX + EphemeralKeySet so keys are not persisted to the user store.
 /// </summary>
 /// <remarks>
-/// Limitation: never installs trust anchors; happy-path WSS tests should use
+/// Limitation: never installs trust anchors; happy-path TCP/mTLS tests should use
 /// <see cref="PersistentDevCertificates"/> instead.
 /// </remarks>
 internal static class TestCertificateFactory

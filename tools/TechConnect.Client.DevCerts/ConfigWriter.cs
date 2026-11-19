@@ -57,12 +57,18 @@ internal static class ConfigWriter
         clientCert["ExpectedSubject"] = DevCertIdentities.ClientSubject;
         clientCert["ExpectedIssuer"] = DevCertIdentities.CaSubject;
 
-        if (string.IsNullOrWhiteSpace(remote["BaseUrl"]?.GetValue<string>()))
+        if (string.IsNullOrWhiteSpace(remote["Host"]?.GetValue<string>()))
         {
-            // Placeholder for local pre-prod; operator fills host/port when running a local WSS endpoint.
-            remote["BaseUrl"] = "https://127.0.0.1:7443";
-            remote["WebSocketPath"] = "/ws";
+            // Local TCP/mTLS defaults; operator may change host/port for their server listener.
+            remote["Host"] = "127.0.0.1";
+            remote["Port"] = 9443;
+            remote["TlsHostName"] = "localhost";
         }
+
+        // Strip obsolete settings if present in an older Development file.
+        remote.Remove("BaseUrl");
+        remote.Remove("WebSocketPath");
+        remote.Remove("HeartbeatIntervalSeconds");
 
         var development = root["DevelopmentCertificates"] as JsonObject ?? new JsonObject();
         root["DevelopmentCertificates"] = development;

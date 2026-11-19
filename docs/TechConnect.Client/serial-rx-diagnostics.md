@@ -9,7 +9,7 @@ When the COM port opens but the console shows `RX: 0`, isolate whether the failu
 3. Serial configuration mismatch (baud/framing)
 4. Application receive path / UI
 
-WSS must never be required for this diagnosis.
+Remote TCP/mTLS must never be required for this diagnosis.
 
 ## Automated vs physical
 

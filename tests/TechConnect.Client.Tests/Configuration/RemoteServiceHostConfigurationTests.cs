@@ -3,7 +3,7 @@
 // File:    RemoteServiceHostConfigurationTests.cs
 //
 // Purpose:
-// Verifies RemoteServiceHost configuration binding and validation for TCP/WSS hosts.
+// Verifies RemoteServiceHost configuration binding and validation for TCP/mTLS hosts.
 //
 // -----------------------------------------------------------------------------
 

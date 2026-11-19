@@ -80,7 +80,7 @@ internal sealed class FakeSerialPortDiscoveryService : ISerialPortDiscoveryServi
 /// configuration or transport errors, and raise snapshot/fault events for UI tests.
 /// </summary>
 /// <remarks>
-/// Limitation: does not drive real serial or WSS; NOC attachment stays at Waiting unless
+/// Limitation: does not drive real serial or TCP/mTLS; NOC attachment stays at Waiting unless
 /// a snapshot is raised explicitly; Delivery stats are always empty.
 /// </remarks>
 internal sealed class FakeRemoteSessionService : IRemoteSessionService
@@ -132,10 +132,10 @@ internal sealed class FakeRemoteSessionService : IRemoteSessionService
     /// </summary>
     public int StopCount { get; private set; }
 
-    /// <summary>When true, StartAsync ends in Error (empty BaseUrl / not configured).</summary>
+    /// <summary>When true, StartAsync ends in Error (remote host not configured).</summary>
     public bool StartAsConfigurationError { get; set; }
 
-    /// <summary>When true, StartAsync ends in Error simulating a WSS/transport failure.</summary>
+    /// <summary>When true, StartAsync ends in Error simulating a remote transport failure.</summary>
     public bool StartAsRemoteFailure { get; set; }
 
     /// <summary>

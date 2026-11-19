@@ -3,7 +3,7 @@
 // File:    PersistentDevCertificates.cs
 //
 // Purpose:
-// Loads provisioned TechConnect.Client development certificates from the Windows store for happy-path WSS tests. Never installs or removes certificates.
+// Loads provisioned TechConnect.Client development certificates from the Windows store for happy-path TCP/mTLS tests. Never installs or removes certificates.
 //
 // -----------------------------------------------------------------------------
 
@@ -24,7 +24,7 @@ internal static class PersistentDevCertificates
     /// </summary>
     public const string CaSubject = "CN=TechConnector Development CA";
     /// <summary>
-    /// Expected WSS server subject distinguished name.
+    /// Expected development TCP/mTLS server subject (historical CN; identity unchanged).
     /// </summary>
     public const string ServerSubject = "CN=TechConnector Development WSS";
     /// <summary>
@@ -137,31 +137,7 @@ internal static class PersistentDevCertificates
     }
 
     /// <summary>
-    /// Builds RemoteServiceOptions for WSS tests using the provisioned client thumbprint.
-    /// </summary>
-    public static RemoteServiceOptions CreateClientOptions(string baseUrl, string webSocketPath = "/ws")
-    {
-        var registry = RequireProvisioned();
-        return new RemoteServiceOptions
-        {
-            // Legacy WSS fields retained for existing WebSocket test fixtures.
-            BaseUrl = baseUrl.TrimEnd('/'),
-            WebSocketPath = webSocketPath,
-            ConnectTimeoutSeconds = 5,
-            HeartbeatIntervalSeconds = 15,
-            ClientCertificate = new ClientCertificateOptions
-            {
-                Thumbprint = registry.ClientThumbprint,
-                StoreName = "My",
-                StoreLocation = StoreLocation.CurrentUser,
-                ExpectedSubject = ClientSubject,
-                ExpectedIssuer = CaSubject
-            }
-        };
-    }
-
-    /// <summary>
-    /// Builds RemoteServiceOptions for TCP mTLS tests using the provisioned client thumbprint.
+    /// Builds RemoteServiceOptions for TCP/mTLS tests using the provisioned client thumbprint.
     /// </summary>
     public static RemoteServiceOptions CreateTcpClientOptions(string host, int port, string tlsHostName = "localhost")
     {
@@ -172,7 +148,6 @@ internal static class PersistentDevCertificates
             Port = port,
             TlsHostName = tlsHostName,
             ConnectTimeoutSeconds = 5,
-            HeartbeatIntervalSeconds = 15,
             ClientCertificate = new ClientCertificateOptions
             {
                 Thumbprint = registry.ClientThumbprint,

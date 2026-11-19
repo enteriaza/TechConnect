@@ -62,10 +62,10 @@ public sealed class MainFormConnectionStateTests
         UiReflection.GetPrivateField<Label>(form, "_errorLabel");
 
     /// <summary>
-    /// Reads the private console TextBox via reflection.
+    /// Reads the private VT terminal control via reflection.
     /// </summary>
-    private static TextBox ConsoleBox(MainForm form) =>
-        UiReflection.GetPrivateField<TextBox>(form, "_consoleTextBox");
+    private static SerialTerminalControl ConsoleTerminal(MainForm form) =>
+        UiReflection.GetPrivateField<SerialTerminalControl>(form, "_consoleTerminal");
 
     /// <summary>
     /// Polls a UI condition on the STA thread until true or timeout.
@@ -101,7 +101,7 @@ public sealed class MainFormConnectionStateTests
     }
 
     /// <summary>
-    /// Forces console buffer drain into the TextBox for assertions.
+    /// Forces console buffer drain into the VT terminal for assertions.
     /// </summary>
     private static void FlushConsole(MainForm form)
     {
@@ -135,7 +135,7 @@ public sealed class MainFormConnectionStateTests
                         () => serial.IsOpen &&
                               ConnectButton(form).Text == "Disconnect" &&
                               SerialStatus(form).Text == "Connected",
-                        "serial must be Connected with Disconnect before WSS finishes");
+                        "serial must be Connected with Disconnect before remote finishes");
 
                     // Remote start still held — serial already usable.
                     remote.StartCount.Should().BeLessThanOrEqualTo(1);
@@ -154,7 +154,7 @@ public sealed class MainFormConnectionStateTests
     /// Expected: serial stays open; not-configured message; Disconnect available.
     /// </summary>
     [Fact]
-    public async Task MissingBaseUrl_KeepsSerialOpen_ShowsNotConfigured_Disconnect()
+    public async Task MissingRemoteHost_KeepsSerialOpen_ShowsNotConfigured_Disconnect()
     {
         await StaTask.Run(async () =>
         {
@@ -199,7 +199,7 @@ public sealed class MainFormConnectionStateTests
                 await ClickConnectAsync(form);
                 await WaitForUiAsync(
                     () => serial.IsOpen && ConnectButton(form).Text == "Disconnect",
-                    "WSS failure must leave serial connected");
+                    "remote failure must leave serial connected");
 
                 serial.IsOpen.Should().BeTrue();
                 SerialStatus(form).Text.Should().Be("Connected");
@@ -229,8 +229,8 @@ public sealed class MainFormConnectionStateTests
                 FlushConsole(form);
 
                 await WaitForUiAsync(
-                    () => ConsoleBox(form).Text.Contains("device>", StringComparison.Ordinal),
-                    "local console must show RX while WSS is not configured");
+                    () => ConsoleTerminal(form).GetVisibleText().Contains("device>", StringComparison.Ordinal),
+                    "local console must show RX while remote is not configured");
             }
         });
     }
@@ -260,8 +260,8 @@ public sealed class MainFormConnectionStateTests
                     FlushConsole(form);
 
                     await WaitForUiAsync(
-                        () => ConsoleBox(form).Text.Contains("boot", StringComparison.Ordinal),
-                        "local console must show RX while WSS is still connecting");
+                        () => ConsoleTerminal(form).GetVisibleText().Contains("boot", StringComparison.Ordinal),
+                        "local console must show RX while remote is still connecting");
                 }
                 finally
                 {
@@ -334,7 +334,7 @@ public sealed class MainFormConnectionStateTests
                     await ClickConnectAsync(form);
                     await WaitForUiAsync(
                         () => !serial.IsOpen && ConnectButton(form).Text == "Connect",
-                        "disconnect must close serial even while WSS start is held");
+                        "disconnect must close serial even while remote start is held");
 
                     remote.StopCount.Should().BeGreaterThanOrEqualTo(1);
                 }
@@ -475,7 +475,7 @@ public sealed class MainFormConnectionStateTests
                     () => serial.IsOpen &&
                           RemoteStatus(form).Text == "Connected" &&
                           ConnectButton(form).Text == "Disconnect",
-                    "WSS connected; button still Disconnect");
+                    "remote connected; button still Disconnect");
 
                 SerialStatus(form).Text.Should().Be("Connected");
             }

@@ -40,7 +40,7 @@ static void PrintHelp()
 
         Commands:
           provision [--confirm-trust] [--yes]
-              Idempotently create/reuse the development CA, WSS server, and client certificates.
+              Idempotently create/reuse the development CA, TCP/mTLS server, and client certificates.
               Does not remove certificates. Does not silently rotate.
               Installing the CA into CurrentUser\Root requires --confirm-trust
               (and interactive YES unless --yes is also supplied).

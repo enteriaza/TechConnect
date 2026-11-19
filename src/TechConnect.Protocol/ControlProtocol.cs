@@ -3,8 +3,8 @@
 // File:    ControlProtocol.cs
 //
 // Purpose:
-// Retains the legacy WebSocket-oriented control JSON envelope and related
-// payload DTOs used by older TechConnect.Client session code paths.
+// Control JSON envelope and related payload DTOs used by TechConnect.Client
+// session code paths alongside binary TechConnect.Protocol framing.
 //
 // -----------------------------------------------------------------------------
 
@@ -14,13 +14,14 @@ using System.Text.Json.Serialization;
 namespace TechConnect.Protocol;
 
 /// <summary>
-/// Legacy WebSocket-oriented control JSON envelope retained for existing TechConnect.Client session code.
+/// Control JSON envelope helpers used by TechConnect.Client session code.
 /// </summary>
 /// <remarks>
-/// New TCP/mTLS traffic uses <see cref="Framing.FrameReader"/> /
+/// TCP/mTLS traffic uses <see cref="Framing.FrameReader"/> /
 /// <see cref="Framing.FrameWriter"/> with typed payloads under <see cref="Messages"/>.
-/// This static helper serializes a versioned envelope where the logical message
-/// type is a string inside JSON rather than a binary frame header byte.
+/// This static helper serializes a versioned JSON envelope where the logical message
+/// type is a string inside JSON rather than a binary frame header byte. The Client
+/// maps between this envelope and binary control frames on the wire.
 /// </remarks>
 public static class ControlProtocol
 {
@@ -226,7 +227,7 @@ public static class ControlProtocol
 }
 
 /// <summary>
-/// Legacy versioned control envelope used by WebSocket-oriented session code.
+/// Versioned control JSON envelope used by TechConnect.Client session code.
 /// </summary>
 public sealed class ControlMessage
 {

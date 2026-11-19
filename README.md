@@ -65,7 +65,7 @@ dotnet build .\TechConnect.slnx --no-restore
 dotnet test .\TechConnect.slnx --no-build
 ```
 
-Client WSS/mTLS happy-path tests require provisioned development certificates; they fail with a clear prerequisite error when certificates are missing (they never auto-provision).
+Client TCP/mTLS happy-path tests require provisioned development certificates; they fail with a clear prerequisite error when certificates are missing (they never auto-provision).
 
 ## Local development
 

@@ -3,7 +3,7 @@
 // File:    RemoteEndpointAndOptionsTests.cs
 //
 // Purpose:
-// Verifies RemoteEndpoint URI derivation and RemoteService options validation.
+// Verifies RemoteEndpoint Host/Port resolution and RemoteService options validation.
 //
 // -----------------------------------------------------------------------------
 
@@ -15,115 +15,44 @@ using TechConnect.Client.Transport;
 namespace TechConnect.Client.Tests.Configuration;
 
 /// <summary>
-/// Unit tests for RemoteEndpoint URI derivation and RemoteService options validation.
+/// Unit tests for RemoteEndpoint Host/Port helpers and RemoteService options validation.
 /// </summary>
 public sealed class RemoteEndpointAndOptionsTests
 {
     /// <summary>
-    /// Scenario: https BaseUrl with explicit port and path.
-    /// Expected: wss URI with same host/port/path.
-    /// </summary>
-    [Fact]
-    public void CreateWebSocketUri_HttpsMapsToWss()
-    {
-        var options = new RemoteServiceOptions
-        {
-            BaseUrl = "https://remote.contoso.test:8443",
-            WebSocketPath = "/console/v1/session"
-        };
-
-        var uri = RemoteEndpoint.CreateWebSocketUri(options);
-        uri.Scheme.Should().Be("wss");
-        uri.Host.Should().Be("remote.contoso.test");
-        uri.Port.Should().Be(8443);
-        uri.AbsolutePath.Should().Be("/console/v1/session");
-    }
-
-    /// <summary>
-    /// Scenario: https BaseUrl on default port 443.
-    /// Expected: wss URI omits an explicit port.
-    /// </summary>
-    [Fact]
-    public void CreateWebSocketUri_DefaultHttpsPort_OmitsPort()
-    {
-        var options = new RemoteServiceOptions
-        {
-            BaseUrl = "https://remote.contoso.test",
-            WebSocketPath = "/ws"
-        };
-
-        var uri = RemoteEndpoint.CreateWebSocketUri(options);
-        uri.IsDefaultPort.Should().BeTrue();
-        uri.ToString().Should().Be("wss://remote.contoso.test/ws");
-    }
-
-    /// <summary>
-    /// Scenario: non-https BaseUrl values.
-    /// Expected: CreateWebSocketUri throws.
-    /// </summary>
-    [Theory]
-    [InlineData("http://remote.contoso.test")]
-    [InlineData("ws://remote.contoso.test")]
-    [InlineData("wss://remote.contoso.test")]
-    public void CreateWebSocketUri_RejectsNonHttps(string baseUrl)
-    {
-        var options = new RemoteServiceOptions { BaseUrl = baseUrl };
-        var act = () => RemoteEndpoint.CreateWebSocketUri(options);
-        act.Should().Throw<RemoteTransportConfigurationException>()
-            .WithMessage("*HTTPS*");
-    }
-
-    /// <summary>
-    /// Scenario: placeholder host BaseUrls.
-    /// Expected: CreateWebSocketUri throws.
-    /// </summary>
-    [Theory]
-    [InlineData("https://example.com")]
-    [InlineData("https://foo.example.org")]
-    [InlineData("https://example.org/path")]
-    public void CreateWebSocketUri_RejectsPlaceholderHosts(string baseUrl)
-    {
-        var options = new RemoteServiceOptions { BaseUrl = baseUrl };
-        var act = () => RemoteEndpoint.CreateWebSocketUri(options);
-        act.Should().Throw<RemoteTransportConfigurationException>()
-            .WithMessage("*placeholder*");
-    }
-
-    /// <summary>
-    /// Scenario: empty BaseUrl.
-    /// Expected: CreateWebSocketUri throws.
-    /// </summary>
-    [Fact]
-    public void CreateWebSocketUri_EmptyBaseUrl_Throws()
-    {
-        var act = () => RemoteEndpoint.CreateWebSocketUri(new RemoteServiceOptions());
-        act.Should().Throw<RemoteTransportConfigurationException>()
-            .WithMessage("*not configured*");
-    }
-
-    /// <summary>
-    /// Scenario: IsConfigured checks for https non-placeholder BaseUrl.
-    /// Expected: true only for valid https endpoints.
-    /// </summary>
-    [Fact]
-    public void IsConfigured_RequiresHttpsNonPlaceholder()
-    {
-        RemoteEndpoint.IsConfigured(new RemoteServiceOptions()).Should().BeFalse();
-        RemoteEndpoint.IsConfigured(new RemoteServiceOptions { BaseUrl = "https://example.com" }).Should().BeFalse();
-        RemoteEndpoint.IsConfigured(new RemoteServiceOptions { BaseUrl = "http://real.contoso.test" }).Should().BeFalse();
-        RemoteEndpoint.IsConfigured(new RemoteServiceOptions { BaseUrl = "https://real.contoso.test" }).Should().BeTrue();
-    }
-
-    /// <summary>
-    /// Scenario: TCP Host/Port configuration without placeholders.
-    /// Expected: IsConfigured reflects host/port validity.
+    /// Scenario: IsConfigured checks Host/Port non-placeholder.
+    /// Expected: true only for valid host and port.
     /// </summary>
     [Fact]
     public void IsConfigured_RequiresHostPortNonPlaceholder()
     {
+        RemoteEndpoint.IsConfigured(new RemoteServiceOptions()).Should().BeFalse();
         RemoteEndpoint.IsConfigured(new RemoteServiceOptions { Host = "example.com", Port = 9443 }).Should().BeFalse();
         RemoteEndpoint.IsConfigured(new RemoteServiceOptions { Host = "127.0.0.1", Port = 0 }).Should().BeFalse();
         RemoteEndpoint.IsConfigured(new RemoteServiceOptions { Host = "127.0.0.1", Port = 9443 }).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// Scenario: ResolveTlsHostName prefers TlsHostName then Host.
+    /// Expected: trimmed values; missing host throws.
+    /// </summary>
+    [Fact]
+    public void ResolveTlsHostName_UsesTlsHostOrHost()
+    {
+        RemoteEndpoint.ResolveTlsHostName(new RemoteServiceOptions
+        {
+            Host = "127.0.0.1",
+            TlsHostName = "localhost"
+        }).Should().Be("localhost");
+
+        RemoteEndpoint.ResolveTlsHostName(new RemoteServiceOptions
+        {
+            Host = "remote.contoso.test"
+        }).Should().Be("remote.contoso.test");
+
+        var act = () => RemoteEndpoint.ResolveTlsHostName(new RemoteServiceOptions());
+        act.Should().Throw<RemoteTransportConfigurationException>()
+            .WithMessage("*not configured*");
     }
 
     /// <summary>
@@ -139,7 +68,6 @@ public sealed class RemoteEndpointAndOptionsTests
             Host = "remote.contoso.test",
             Port = 9443,
             TlsHostName = "remote.contoso.test",
-            HeartbeatIntervalSeconds = 15,
             ConnectTimeoutSeconds = 30,
             ClientCertificate = new ClientCertificateOptions
             {
@@ -153,48 +81,19 @@ public sealed class RemoteEndpointAndOptionsTests
     }
 
     /// <summary>
-    /// Scenario: http BaseUrl.
+    /// Scenario: placeholder Host.
     /// Expected: validation failure.
     /// </summary>
     [Fact]
-    public void Validator_RejectsHttpBaseUrl()
+    public void Validator_RejectsPlaceholderHost()
     {
         var result = new RemoteServiceOptionsValidator().Validate(null, new RemoteServiceOptions
         {
-            BaseUrl = "http://remote.contoso.test"
-        });
-        result.Failed.Should().BeTrue();
-        result.Failures.Should().Contain(f => f.Contains("HTTPS", StringComparison.Ordinal));
-    }
-
-    /// <summary>
-    /// Scenario: placeholder BaseUrl.
-    /// Expected: validation failure.
-    /// </summary>
-    [Fact]
-    public void Validator_RejectsPlaceholderBaseUrl()
-    {
-        var result = new RemoteServiceOptionsValidator().Validate(null, new RemoteServiceOptions
-        {
-            BaseUrl = "https://api.example.com"
+            Host = "api.example.com",
+            Port = 9443
         });
         result.Failed.Should().BeTrue();
         result.Failures.Should().Contain(f => f.Contains("placeholder", StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>
-    /// Scenario: invalid WebSocket path.
-    /// Expected: validation failure.
-    /// </summary>
-    [Fact]
-    public void Validator_RejectsBadWebSocketPath()
-    {
-        var result = new RemoteServiceOptionsValidator().Validate(null, new RemoteServiceOptions
-        {
-            WebSocketPath = "console"
-        });
-        result.Failed.Should().BeTrue();
-        result.Failures.Should().Contain(f => f.Contains("WebSocketPath", StringComparison.Ordinal));
     }
 
     /// <summary>

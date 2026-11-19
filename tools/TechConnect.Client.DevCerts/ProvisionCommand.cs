@@ -55,7 +55,7 @@ internal static class ProvisionCommand
                     return 2;
                 }
 
-                Console.WriteLine("Creating development WSS server certificate…");
+                Console.WriteLine("Creating development TCP/mTLS server certificate…");
                 server = CertificateFactory.CreateServerCertificate(caWithKey);
                 CertificateStoreAccess.Install(StoreName.My, StoreLocation.CurrentUser, server);
                 registry.ServerThumbprint = CertificateStoreAccess.NormalizeThumbprint(server.Thumbprint);

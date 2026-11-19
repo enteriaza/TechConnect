@@ -3,7 +3,7 @@
 // File:    MainForm.cs
 //
 // Purpose:
-// Primary WinForms UI: serial port selection/session, local console display,
+// Primary WinForms UI: serial port selection/session, local VT100 console display,
 // remote-session status, and bounded shutdown of serial and remote resources.
 //
 // -----------------------------------------------------------------------------
@@ -28,7 +28,7 @@ public partial class MainForm : Form
     /// <summary>Debounce interval for USB serial device-change refreshes.</summary>
     private const int DeviceChangeDebounceMilliseconds = 500;
 
-    /// <summary>Interval for draining <see cref="SerialConsoleBuffer"/> into the text box.</summary>
+    /// <summary>Interval for draining <see cref="SerialConsoleBuffer"/> into the VT terminal.</summary>
     private const int ConsoleFlushMilliseconds = 75;
 
     /// <summary>Poll interval for TX/RX indicator color updates.</summary>
@@ -58,13 +58,13 @@ public partial class MainForm : Form
     /// <summary>Owns the remote console session lifecycle and snapshots.</summary>
     private readonly IRemoteSessionService _remoteSession;
 
-    /// <summary>Batches local RX into console text for periodic UI flush.</summary>
+    /// <summary>Batches local RX octets for periodic UI-thread VT terminal writes.</summary>
     private readonly SerialConsoleBuffer _consoleBuffer = new();
 
     /// <summary>Debounces device-change port refreshes.</summary>
     private readonly System.Windows.Forms.Timer _deviceChangeDebounceTimer;
 
-    /// <summary>Drains the console buffer onto the UI thread.</summary>
+    /// <summary>Drains pending RX octets into the VT terminal on the UI thread.</summary>
     private readonly System.Windows.Forms.Timer _consoleFlushTimer;
 
     /// <summary>Refreshes TX/RX indicator colors on a short poll.</summary>
@@ -429,13 +429,6 @@ public partial class MainForm : Form
                 _disconnectOperationInProgress)
             {
                 return;
-            }
-
-            if (_consoleTextBox.Text.StartsWith("[console ready]", StringComparison.Ordinal))
-            {
-                _consoleBuffer.ClearPending();
-                _consoleBuffer.NotifyDisplayCleared();
-                _consoleTextBox.Clear();
             }
 
             // Serial is up — local console is usable immediately. Remote TCP/mTLS starts independently.
@@ -932,33 +925,28 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// Drains the console buffer into the text box and optionally trims leading text.
+    /// Drains pending RX octets into the VT terminal on the UI thread.
     /// </summary>
     private void ConsoleFlushTimer_Tick(object? sender, EventArgs e)
     {
-        if (!_consoleBuffer.TryDrain(out var text, out var charactersToTrim))
+        if (!_consoleBuffer.TryDrain(out var data, out var droppedSincePreviousDrain))
         {
             return;
         }
 
-        if (charactersToTrim > 0 && _consoleTextBox.TextLength > 0)
+        if (droppedSincePreviousDrain > 0)
         {
-            var trimCount = Math.Min(charactersToTrim, _consoleTextBox.TextLength);
-            _consoleTextBox.Select(0, trimCount);
-            _consoleTextBox.SelectedText = string.Empty;
+            _logger.LogWarning(
+                "Local console display buffer exceeded capacity; dropped {DroppedBytes} pending display bytes (serial transport unaffected)",
+                droppedSincePreviousDrain);
         }
 
-        var shouldStickToEnd =
-            _consoleTextBox.SelectionStart >= Math.Max(0, _consoleTextBox.TextLength - 2);
-
-        _consoleTextBox.AppendText(text);
-
-        if (shouldStickToEnd)
+        if (IsDisposed || Disposing || _consoleTerminal.IsDisposed)
         {
-            _consoleTextBox.SelectionStart = _consoleTextBox.TextLength;
-            _consoleTextBox.ScrollToCaret();
+            return;
         }
 
+        _consoleTerminal.Write(data);
         UpdateTrafficUi(force: false);
     }
 
@@ -1017,13 +1005,16 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// Clears pending console text and the on-screen text box.
+    /// Clears pending console octets and the on-screen VT terminal.
     /// </summary>
     private void ClearConsoleButton_Click(object? sender, EventArgs e)
     {
         _consoleBuffer.ClearPending();
-        _consoleBuffer.NotifyDisplayCleared();
-        _consoleTextBox.Clear();
+        if (!IsDisposed && !Disposing && !_consoleTerminal.IsDisposed)
+        {
+            _consoleTerminal.ClearTerminal();
+        }
+
         _logger.LogInformation("Console display cleared by technician");
     }
 

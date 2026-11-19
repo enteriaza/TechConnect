@@ -134,16 +134,6 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
     /// <inheritdoc />
     public event EventHandler<ReadOnlyMemory<byte>>? SerialDataReceived;
 
-    /// <summary>
-    /// Reserved for typed serial-configuration events; currently a no-op (add/remove discarded).
-    /// Configuration still arrives as framed control JSON on <see cref="ControlMessageReceived"/>.
-    /// </summary>
-    public event EventHandler<SerialPortConfiguration>? ConfigurationReceived
-    {
-        add { }
-        remove { }
-    }
-
     /// <inheritdoc />
     public event EventHandler<string>? ControlMessageReceived;
 
@@ -373,25 +363,6 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
         }
 
         return protocol.WriteHelloAsync(message, cancellationToken);
-    }
-
-    /// <inheritdoc />
-    /// <remarks>
-    /// Application-level heartbeats are not yet implemented on this transport; when connected
-    /// this method completes successfully as a no-op. Session health uses protocol frames such as
-    /// <see cref="MessageType.SessionPing"/> instead.
-    /// </remarks>
-    public Task SendHeartbeatAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (!IsConnected)
-        {
-            return Task.FromException(new RemoteTransportUnavailableException(
-                "The remote TCP/TLS connection is not open."));
-        }
-
-        return Task.CompletedTask;
     }
 
     /// <inheritdoc />

@@ -4,7 +4,7 @@
 //
 // Purpose:
 // In-memory IRemoteConsoleTransport and ISerialConnectionService fakes for
-// session, reconnect, and pipeline tests without real WSS/TCP or COM hardware.
+// session, reconnect, and pipeline tests without real TCP/mTLS or COM hardware.
 //
 // -----------------------------------------------------------------------------
 
@@ -21,7 +21,7 @@ namespace TechConnect.Client.Tests.Support;
 /// can hold/fail connect, and can emit inbound serial/control/fault events.
 /// </summary>
 /// <remarks>
-/// Limitation: does not speak real framing or TLS; <see cref="SendHeartbeatAsync"/> is a no-op when connected;
+/// Limitation: does not speak real framing or TLS;
 /// concurrent connection accounting is approximate for test assertions only.
 /// </remarks>
 internal sealed class FakeRemoteTransport : IRemoteConsoleTransport
@@ -100,9 +100,6 @@ internal sealed class FakeRemoteTransport : IRemoteConsoleTransport
     public event EventHandler<ReadOnlyMemory<byte>>? SerialDataReceived;
 
     /// <inheritdoc />
-    public event EventHandler<SerialPortConfiguration>? ConfigurationReceived;
-
-    /// <inheritdoc />
     public event EventHandler<string>? ControlMessageReceived;
 
     /// <inheritdoc />
@@ -155,12 +152,6 @@ internal sealed class FakeRemoteTransport : IRemoteConsoleTransport
         SerialDataReceived?.Invoke(this, data);
         return Task.CompletedTask;
     }
-
-    /// <summary>
-    /// Raises <see cref="ConfigurationReceived"/> with the given configuration.
-    /// </summary>
-    public void EmitConfiguration(SerialPortConfiguration configuration) =>
-        ConfigurationReceived?.Invoke(this, configuration);
 
     /// <summary>
     /// Raises <see cref="ControlMessageReceived"/> with the given JSON.
@@ -253,18 +244,6 @@ internal sealed class FakeRemoteTransport : IRemoteConsoleTransport
         }
 
         SentControlMessages.Enqueue(json);
-        return Task.CompletedTask;
-    }
-
-    /// <inheritdoc />
-    public Task SendHeartbeatAsync(CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!_connected)
-        {
-            return Task.FromException(new RemoteTransportUnavailableException("Not connected."));
-        }
-
         return Task.CompletedTask;
     }
 

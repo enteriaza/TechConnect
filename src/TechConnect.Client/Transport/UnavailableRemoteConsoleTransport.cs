@@ -9,7 +9,6 @@
 // -----------------------------------------------------------------------------
 
 using TechConnect.Client.Abstractions;
-using TechConnect.Client.Models;
 
 namespace TechConnect.Client.Transport;
 
@@ -31,13 +30,6 @@ internal sealed class UnavailableRemoteConsoleTransport : IRemoteConsoleTranspor
 
     /// <inheritdoc />
     public event EventHandler<ReadOnlyMemory<byte>>? SerialDataReceived
-    {
-        add { }
-        remove { }
-    }
-
-    /// <inheritdoc />
-    public event EventHandler<SerialPortConfiguration>? ConfigurationReceived
     {
         add { }
         remove { }
@@ -78,15 +70,6 @@ internal sealed class UnavailableRemoteConsoleTransport : IRemoteConsoleTranspor
     /// <inheritdoc />
     /// <exception cref="RemoteTransportUnavailableException">Always thrown when not cancelled.</exception>
     public Task SendControlMessageAsync(string json, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromException(new RemoteTransportUnavailableException(
-            "Remote console transport is not connected."));
-    }
-
-    /// <inheritdoc />
-    /// <exception cref="RemoteTransportUnavailableException">Always thrown when not cancelled.</exception>
-    public Task SendHeartbeatAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromException(new RemoteTransportUnavailableException(

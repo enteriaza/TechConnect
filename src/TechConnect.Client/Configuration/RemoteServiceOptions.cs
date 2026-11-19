@@ -16,9 +16,8 @@ namespace TechConnect.Client.Configuration;
 /// Options for connecting TechConnect.Client to TechConnect.Server.
 /// </summary>
 /// <remarks>
-/// Bound under <see cref="SectionName"/>. Prefer <see cref="Host"/> + <see cref="Port"/>
-/// for the native TCP/mTLS connector. <see cref="BaseUrl"/> / <see cref="WebSocketPath"/>
-/// remain for older appsettings binding only. Never place private keys in these options;
+/// Bound under <see cref="SectionName"/>. Configure <see cref="Host"/> + <see cref="Port"/>
+/// for the native TCP/mTLS connector. Never place private keys in these options;
 /// client identity is a Windows-store thumbprint via <see cref="ClientCertificate"/>.
 /// </remarks>
 public sealed class RemoteServiceOptions
@@ -48,40 +47,17 @@ public sealed class RemoteServiceOptions
     public string TlsHostName { get; set; } = string.Empty;
 
     /// <summary>
-    /// Obsolete WSS base URL. Ignored when <see cref="Host"/> is configured.
-    /// </summary>
-    /// <remarks>
-    /// Retained so older appsettings files bind without throwing. When used by the
-    /// legacy WebSocket transport, must be an absolute HTTPS URI.
-    /// </remarks>
-    public string BaseUrl { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Obsolete WSS path. Ignored by the native TCP/mTLS transport.
-    /// </summary>
-    /// <value>Empty or a path beginning with <c>/</c>.</value>
-    public string WebSocketPath { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Application heartbeat interval in seconds for transports that send heartbeats.
-    /// </summary>
-    /// <value>Defaults to 15; must be at least 1.</value>
-    public int HeartbeatIntervalSeconds { get; set; } = 15;
-
-    /// <summary>
     /// Connect/handshake timeout in seconds.
     /// </summary>
     /// <value>Defaults to 30; must be at least 1.</value>
     public int ConnectTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
-    /// Maximum serial/control payload size in bytes accepted by transports.
+    /// Maximum serial/control payload size in bytes accepted by the TCP/mTLS transport.
     /// </summary>
     /// <remarks>
-    /// Used by the native TCP/mTLS transport to size protocol payload limits
-    /// (floored at 1024) and by the legacy WebSocket transport to reject oversized
-    /// outbound messages. Not a substitute for TechConnect.Protocol frame limits
-    /// beyond this options binding.
+    /// Used to size protocol payload limits (floored at 1024). Not a substitute for
+    /// TechConnect.Protocol frame limits beyond this options binding.
     /// </remarks>
     /// <value>Defaults to 65536; must be at least 1024.</value>
     public int MaximumMessageBytes { get; set; } = 65_536;
@@ -186,7 +162,10 @@ public sealed class DevelopmentCertificatesOptions
     /// <summary>
     /// Expected development server subject.
     /// </summary>
-    /// <value>Defaults to <c>CN=TechConnector Development WSS</c>.</value>
+    /// <value>
+    /// Defaults to <c>CN=TechConnector Development WSS</c>
+    /// (historical subject of the development TCP/mTLS server certificate; identity unchanged).
+    /// </value>
     public string ServerSubject { get; set; } = "CN=TechConnector Development WSS";
 
     /// <summary>

@@ -91,7 +91,7 @@ public sealed class RemoteConfigurationTests
 /// <summary>Local harness exposing reconnect logger for configuration/logging tests.</summary>
 /// <summary>
 /// Local harness exposing serial/transport/time/loggers for configuration and logging tests.
-/// Limitation: uses fakes only; not a real WSS endpoint.
+/// Limitation: uses fakes only; not a real TCP/mTLS endpoint.
 /// </summary>
 internal sealed class RemoteSessionServiceTestsHarness : IAsyncDisposable
 {

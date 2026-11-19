@@ -225,7 +225,7 @@ public sealed class RemoteSessionServiceTests
     }
 
     /// <summary>
-    /// Scenario: WSS/transport failure after serial open.
+    /// Scenario: remote transport failure after serial open.
     /// Expected: local RX/TX remain usable.
     /// </summary>
     [Fact]

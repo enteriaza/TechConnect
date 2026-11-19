@@ -3,7 +3,7 @@
 // File:    SecurityAuditTests.cs
 //
 // Purpose:
-// Static security audits of TechConnect.Client sources and test support: no cert-validation bypass, no plaintext WS/HTTP fallbacks, no hardcoded credentials, no store mutation in tests.
+// Static security audits of TechConnect.Client sources and test support: no cert-validation bypass, no plaintext HTTP fallbacks, no hardcoded credentials, no store mutation in tests.
 //
 // -----------------------------------------------------------------------------
 
@@ -49,37 +49,36 @@ public sealed class SecurityAuditTests
     private static string TechConnectClientSrc => Path.Combine(RepoRoot, "src", "TechConnect.Client");
 
     /// <summary>
-    /// Scenario: read WebSocketRemoteConsoleTransport.cs from source.
-    /// Expected: no DangerousAcceptAnyServerCertificateValidator or custom RemoteCertificateValidationCallback; intentional comment present.
+    /// Scenario: read TcpMtlsRemoteConsoleTransport.cs from source.
+    /// Expected: no DangerousAcceptAnyServerCertificateValidator or custom RemoteCertificateValidationCallback.
     /// </summary>
     [Fact]
-    public void WebSocketTransport_DoesNotBypassCertificateValidation()
+    public void TcpMtlsTransport_DoesNotBypassCertificateValidation()
     {
-        var path = Path.Combine(TechConnectClientSrc, "Transport", "WebSocketRemoteConsoleTransport.cs");
+        var path = Path.Combine(TechConnectClientSrc, "Transport", "TcpMtlsRemoteConsoleTransport.cs");
         File.Exists(path).Should().BeTrue($"expected source at {path}");
         var source = File.ReadAllText(path);
 
         source.Should().NotContain("DangerousAcceptAnyServerCertificateValidator");
         source.Should().NotContain("RemoteCertificateValidationCallback =");
         source.Should().NotContain(".RemoteCertificateValidationCallback");
-        source.Should().Contain("Intentionally do NOT set a custom RemoteCertificateValidationCallback");
     }
 
     /// <summary>
     /// Scenario: read RemoteEndpoint.cs from source.
-    /// Expected: no http:// or ws:// string fallbacks; wss and UriSchemeHttps remain.
+    /// Expected: no http://, ws://, or wss:// scheme fallbacks.
     /// </summary>
     [Fact]
-    public void RemoteEndpoint_HasNoHttpOrWsFallbacks()
+    public void RemoteEndpoint_HasNoHttpOrWebSocketFallbacks()
     {
         var path = Path.Combine(TechConnectClientSrc, "Transport", "RemoteEndpoint.cs");
         var source = File.ReadAllText(path);
 
-        // No plaintext scheme fallbacks in endpoint derivation.
         Regex.IsMatch(source, @"[""']http://", RegexOptions.IgnoreCase).Should().BeFalse();
         Regex.IsMatch(source, @"[""']ws://", RegexOptions.IgnoreCase).Should().BeFalse();
-        source.Should().Contain("wss");
-        source.Should().Contain("UriSchemeHttps");
+        Regex.IsMatch(source, @"[""']wss://", RegexOptions.IgnoreCase).Should().BeFalse();
+        source.Should().NotContain("CreateWebSocketUri");
+        source.Should().NotContain("WebSocket");
     }
 
     /// <summary>
@@ -103,7 +102,7 @@ public sealed class SecurityAuditTests
     }
 
     /// <summary>
-    /// Scenario: scan Support/*.cs and WebSocket transport tests for store mutation APIs.
+    /// Scenario: scan Support/*.cs for store mutation APIs.
     /// Expected: no store.Add/Remove, InstallCaTrust, RemoveInstalledCertificates, or trustCaInCurrentUserRoot.
     /// </summary>
     [Fact]
@@ -119,10 +118,8 @@ public sealed class SecurityAuditTests
             source.Should().NotContain("store.Remove(", because: $"{Path.GetFileName(file)} must not mutate certificate stores");
             source.Should().NotContain("InstallCaTrust", because: "ephemeral CA trust installation was removed");
             source.Should().NotContain("RemoveInstalledCertificates", because: "certificate-store cleanup was removed");
+            source.Should().NotContain("trustCaInCurrentUserRoot", because: $"{Path.GetFileName(file)} must not install CA trust");
         }
-
-        var transportTests = Path.Combine(RepoRoot, "tests", "TechConnect.Client.Tests", "Transport", "WebSocketRemoteConsoleTransportTests.cs");
-        File.ReadAllText(transportTests).Should().NotContain("trustCaInCurrentUserRoot");
     }
 
     /// <summary>

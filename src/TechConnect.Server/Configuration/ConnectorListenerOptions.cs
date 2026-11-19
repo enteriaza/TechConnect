@@ -64,7 +64,8 @@ public sealed class ConnectorListenerOptions
     public StoreLocation ServerCertificateStoreLocation { get; set; } = StoreLocation.CurrentUser;
 
     /// <summary>
-    /// Optional exact subject match (for example <c>CN=TechConnector Development WSS</c>).
+    /// Optional exact subject match (for example the development TCP/mTLS server subject
+    /// <c>CN=TechConnector Development WSS</c>).
     /// </summary>
     /// <value>Empty means no subject constraint.</value>
     public string ExpectedServerSubject { get; set; } = string.Empty;

@@ -174,4 +174,4 @@ Concurrent writes are serialized by `FrameWriter` so headers/payloads never inte
 - `Serialization.ControlMessageSerializer`
 - `ProtocolException` hierarchy
 
-Legacy WebSocket JSON envelope `ControlProtocol` remains for older session code paths; new TCP traffic uses binary framing.
+TCP/mTLS traffic uses binary framing. `ControlProtocol` is the Client-side JSON envelope mapped to/from those binary control frames.

@@ -752,7 +752,6 @@ internal sealed class RemoteSessionService : IRemoteSessionService
         }
 
         _transport.SerialDataHandler = HandleRemoteSerialDataAsync;
-        _transport.ConfigurationReceived += TransportOnConfigurationReceived;
         _transport.ControlMessageReceived += TransportOnControlMessageReceived;
         _transport.Faulted += TransportOnFaulted;
         _transportHooksAttached = true;
@@ -769,7 +768,6 @@ internal sealed class RemoteSessionService : IRemoteSessionService
         }
 
         _transport.SerialDataHandler = null;
-        _transport.ConfigurationReceived -= TransportOnConfigurationReceived;
         _transport.ControlMessageReceived -= TransportOnControlMessageReceived;
         _transport.Faulted -= TransportOnFaulted;
         _transportHooksAttached = false;
@@ -824,57 +822,6 @@ internal sealed class RemoteSessionService : IRemoteSessionService
                 sessionId);
             Faulted?.Invoke(this, "Unable to write remote data to the serial port.");
             throw;
-        }
-    }
-
-    /// <summary>
-    /// Applies a transport-pushed serial configuration to the local open port (fire-and-forget async void).
-    /// </summary>
-    /// <remarks>
-    /// Generation-gated. Failures are logged; they do not stop the remote session by themselves.
-    /// </remarks>
-    private async void TransportOnConfigurationReceived(object? sender, SerialPortConfiguration configuration)
-    {
-        var generation = Volatile.Read(ref _sessionGeneration);
-        var sessionCts = _sessionCts;
-        var sessionId = SessionId;
-
-        try
-        {
-            if (sessionCts is null ||
-                sessionCts.IsCancellationRequested ||
-                !IsCurrentSession(generation, sessionId, _boundPortName))
-            {
-                return;
-            }
-
-            await _serialConnection.ApplyConfigurationAsync(configuration, sessionCts.Token)
-                .ConfigureAwait(false);
-
-            if (!IsCurrentSession(generation, sessionId, _boundPortName))
-            {
-                return;
-            }
-
-            _logger.LogInformation(
-                "Applied remote serial configuration. ClientSessionId={ClientSessionId}, {Configuration}",
-                sessionId,
-                SerialPortConfigurationValidator.ToLogString(configuration));
-        }
-        catch (OperationCanceledException) when (sessionCts?.IsCancellationRequested == true)
-        {
-        }
-        catch (Exception ex)
-        {
-            if (!IsCurrentSession(generation, sessionId, _boundPortName))
-            {
-                return;
-            }
-
-            _logger.LogWarning(
-                ex,
-                "Remote serial configuration rejected. ClientSessionId={ClientSessionId}",
-                sessionId);
         }
     }
 
