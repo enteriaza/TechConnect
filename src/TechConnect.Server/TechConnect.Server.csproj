@@ -17,8 +17,6 @@
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <RootNamespace>TechConnect.Server</RootNamespace>
     <AssemblyName>TechConnect.Server</AssemblyName>
-    <Version>0.1.0</Version>
-    <InformationalVersion>0.1.0</InformationalVersion>
     <Description>TechConnect SSH server for NOC operator console access.</Description>
     <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>

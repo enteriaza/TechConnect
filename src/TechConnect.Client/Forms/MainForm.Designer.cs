@@ -36,9 +36,6 @@ partial class MainForm
     /// <summary>Clears the on-screen console buffer and terminal display.</summary>
     private Button _clearConsoleButton;
 
-    /// <summary>Runs the serial loopback diagnostic against the open COM port.</summary>
-    private Button _loopbackTestButton;
-
     /// <summary>Static "Serial:" caption in the status row.</summary>
     private Label _serialStatusCaptionLabel;
 
@@ -129,7 +126,6 @@ partial class MainForm
         _refreshPortsButton = new System.Windows.Forms.Button();
         _connectButton = new System.Windows.Forms.Button();
         _clearConsoleButton = new System.Windows.Forms.Button();
-        _loopbackTestButton = new System.Windows.Forms.Button();
         _statusFlow = new System.Windows.Forms.FlowLayoutPanel();
         _serialStatusCaptionLabel = new System.Windows.Forms.Label();
         _serialStatusValueLabel = new System.Windows.Forms.Label();
@@ -178,10 +174,9 @@ partial class MainForm
         // _toolbarLayout
         // 
         _toolbarLayout.AutoSize = true;
-        _toolbarLayout.ColumnCount = 6;
+        _toolbarLayout.ColumnCount = 5;
         _toolbarLayout.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle());
         _toolbarLayout.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100F));
-        _toolbarLayout.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle());
         _toolbarLayout.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle());
         _toolbarLayout.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle());
         _toolbarLayout.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle());
@@ -190,7 +185,6 @@ partial class MainForm
         _toolbarLayout.Controls.Add(_refreshPortsButton, 2, 0);
         _toolbarLayout.Controls.Add(_connectButton, 3, 0);
         _toolbarLayout.Controls.Add(_clearConsoleButton, 4, 0);
-        _toolbarLayout.Controls.Add(_loopbackTestButton, 5, 0);
         _toolbarLayout.Dock = System.Windows.Forms.DockStyle.Fill;
         _toolbarLayout.Location = new System.Drawing.Point(15, 15);
         _toolbarLayout.Name = "_toolbarLayout";
@@ -253,18 +247,6 @@ partial class MainForm
         _clearConsoleButton.Text = "Clear console";
         _clearConsoleButton.UseVisualStyleBackColor = true;
         _clearConsoleButton.Click += ClearConsoleButton_Click;
-        // 
-        // _loopbackTestButton
-        // 
-        _loopbackTestButton.AutoSize = true;
-        _loopbackTestButton.Enabled = false;
-        _loopbackTestButton.Location = new System.Drawing.Point(815, 3);
-        _loopbackTestButton.Name = "_loopbackTestButton";
-        _loopbackTestButton.Size = new System.Drawing.Size(112, 30);
-        _loopbackTestButton.TabIndex = 5;
-        _loopbackTestButton.Text = "Loopback test";
-        _loopbackTestButton.UseVisualStyleBackColor = true;
-        _loopbackTestButton.Click += LoopbackTestButton_Click;
         // 
         // _statusFlow
         // 

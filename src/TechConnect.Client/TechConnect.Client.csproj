@@ -14,8 +14,6 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RootNamespace>TechConnect.Client</RootNamespace>
     <AssemblyName>TechConnect.Client</AssemblyName>
-    <Version>0.1.0</Version>
-    <InformationalVersion>0.1.0</InformationalVersion>
     <Description>Field technician remote serial console connector (Windows).</Description>
     <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
     <ApplicationIcon />

@@ -124,6 +124,7 @@ Details: [docs/TechConnect/publish-release.md](docs/TechConnect/publish-release.
 | Authentication | [docs/TechConnect/authentication.md](docs/TechConnect/authentication.md) |
 | NOC qualification checklist | [docs/TechConnect/noc-qualification.md](docs/TechConnect/noc-qualification.md) |
 | Release publishing | [docs/TechConnect/publish-release.md](docs/TechConnect/publish-release.md) |
+| Assembly versioning | [docs/TechConnect/assembly-versioning.md](docs/TechConnect/assembly-versioning.md) |
 | Development certificates | [docs/TechConnect.Client/development-certificates.md](docs/TechConnect.Client/development-certificates.md) |
 | Serial RX diagnostics | [docs/TechConnect.Client/serial-rx-diagnostics.md](docs/TechConnect.Client/serial-rx-diagnostics.md) |
 | Server operations | [src/TechConnect.Server/README.md](src/TechConnect.Server/README.md) |

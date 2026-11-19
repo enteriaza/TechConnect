@@ -43,9 +43,6 @@ public partial class MainForm : Form
     /// <summary>Default status text when idle and a port may be selected.</summary>
     private const string ReadyMessage = "Select a serial port and click Connect.";
 
-    /// <summary>ASCII probe payload written by the loopback diagnostic.</summary>
-    private const string LoopbackProbeText = "TECHCONNECTOR-RX-TEST-12345";
-
     /// <summary>Structured logger for UI and session lifecycle events.</summary>
     private readonly ILogger<MainForm> _logger;
 
@@ -1028,81 +1025,6 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// Runs the serial loopback diagnostic after confirmation when a port is open.
-    /// </summary>
-    private async void LoopbackTestButton_Click(object? sender, EventArgs e)
-    {
-        if (_shutdownStarted || !_serialConnection.IsOpen)
-        {
-            return;
-        }
-
-        var confirm = MessageBox.Show(
-            this,
-            "This diagnostic writes a short test sequence to the open COM port.\n\n" +
-            "Use ONLY with a physical TX↔RX loopback on the USB adapter " +
-            "(adapter TX jumpered to adapter RX, plus ground). " +
-            "Disconnect the network device first.\n\n" +
-            "Without a loopback jumper, bytes are still transmitted to whatever is connected — " +
-            "TX success alone does NOT prove RX.\n\n" +
-            "Probe text (also shown in the console as TX): " + LoopbackProbeText + "\n\n" +
-            "Continue?",
-            "Serial loopback diagnostic",
-            MessageBoxButtons.OKCancel,
-            MessageBoxIcon.Warning);
-
-        if (confirm != DialogResult.OK)
-        {
-            return;
-        }
-
-        _loopbackTestButton.Enabled = false;
-        try
-        {
-            var probe = System.Text.Encoding.ASCII.GetBytes(LoopbackProbeText);
-            var result = await _serialConnection
-                .RunLoopbackProbeAsync(probe, TimeSpan.FromSeconds(2), CancellationToken.None)
-                .ConfigureAwait(true);
-
-            var settings = result.EffectiveSettings?.ToDiagnosticString() ?? "(unavailable)";
-            var rx = result.ReceiveDiagnosticsAfter;
-            var detail =
-                result.Summary + Environment.NewLine +
-                $"Effective settings: {settings}" + Environment.NewLine +
-                $"ReaderActive={rx?.IsReaderActive}, BytesFromPort={rx?.BytesReceivedFromPort}, " +
-                $"DataTransferredBytes={rx?.BytesDeliveredToDataTransferred}, LastRx={rx?.LastRxUtc?.ToString("O") ?? "none"}";
-
-            _logger.LogInformation(
-                "Loopback diagnostic UI result: Matched={Matched}, BytesWritten={BytesWritten}, BytesReceivedDuringProbe={BytesReceived}",
-                result.ProbeMatched,
-                result.BytesWritten,
-                result.BytesReceivedDuringProbe);
-
-            ApplyLinkStatus(
-                _connectedPortName ?? _selectedPortName,
-                errorMessage: detail);
-
-            MessageBox.Show(
-                this,
-                detail,
-                result.ProbeMatched ? "Loopback matched" : "Loopback did not match",
-                MessageBoxButtons.OK,
-                result.ProbeMatched ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Loopback diagnostic failed");
-            ApplyLinkStatus(
-                _connectedPortName ?? _selectedPortName,
-                errorMessage: FriendlyError("Loopback diagnostic failed.", ex));
-        }
-        finally
-        {
-            UpdateLoopbackButtonUi();
-        }
-    }
-
-    /// <summary>
     /// Refreshes the serial-port list, coalescing concurrent requests into a follow-up pass.
     /// </summary>
     /// <param name="reason">Why the refresh was requested.</param>
@@ -1431,19 +1353,6 @@ public partial class MainForm : Form
 
         _connectButton.Text = "Connect";
         _connectButton.Enabled = GetSelectedValidPortName() is not null;
-        UpdateLoopbackButtonUi();
-    }
-
-    /// <summary>
-    /// Enables the loopback diagnostic only when a stable open serial session exists.
-    /// </summary>
-    private void UpdateLoopbackButtonUi()
-    {
-        _loopbackTestButton.Enabled =
-            !_shutdownStarted &&
-            !_disconnectOperationInProgress &&
-            _serialConnection.IsOpen &&
-            _connectionStatus is not ConnectionStatus.Connecting and not ConnectionStatus.Disconnecting;
     }
 
     /// <summary>

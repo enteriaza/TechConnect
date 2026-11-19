@@ -2,4 +2,37 @@
   <!-- Repository defaults for SDK-style projects. -->
   <Import Project="build\TechConnect.Net10.Defaults.props" Condition="'$(TechConnectNet10DefaultsImported)' != 'true'" />
   <Import Project="build\TechConnect.EnforceNet10.targets" Condition="'$(TechConnectEnforceNet10Imported)' != 'true'" />
+
+  <!--
+    TechConnect versioning (one source of truth for every project).
+
+    Product version: 1.1.YYDDD
+      YY  = two-digit UTC year
+      DDD = UTC day of year (001–366)
+
+    Policy: docs/TechConnect/assembly-versioning.md
+  -->
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <SourceRevisionId></SourceRevisionId>
+    <GenerateAssemblyFileVersionAttribute>true</GenerateAssemblyFileVersionAttribute>
+    <GenerateAssemblyInformationalVersionAttribute>true</GenerateAssemblyInformationalVersionAttribute>
+    <GenerateAssemblyVersionAttribute>true</GenerateAssemblyVersionAttribute>
+
+    <!-- Change only when deliberately bumping the release line. -->
+    <TechConnectVersionMajorMinor>1.1</TechConnectVersionMajorMinor>
+
+    <!--
+      Optional override for reproducible builds / tests:
+        -p:TechConnectBuildNumber=26323
+      Otherwise: UTC year (yy) + zero-padded UTC day-of-year.
+    -->
+    <TechConnectBuildNumber Condition="'$(TechConnectBuildNumber)' == ''">$([System.DateTime]::UtcNow.ToString('yy'))$([System.String]::Format('{0:D3}', $([System.DateTime]::UtcNow.DayOfYear)))</TechConnectBuildNumber>
+
+    <Version>$(TechConnectVersionMajorMinor).$(TechConnectBuildNumber)</Version>
+    <AssemblyVersion>$(TechConnectVersionMajorMinor).0.0</AssemblyVersion>
+    <FileVersion>$(TechConnectVersionMajorMinor).$(TechConnectBuildNumber).0</FileVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+  </PropertyGroup>
 </Project>
