@@ -45,9 +45,14 @@ internal static class RemoteConfigurationStartupDiagnostics
         var configured = RemoteEndpoint.IsConfigured(options);
         var thumbprint = options.ClientCertificate?.Thumbprint?.Trim() ?? string.Empty;
         var thumbprintConfigured = thumbprint.Length > 0;
+        // Normalize before prefixing so diagnostics show uppercase hex only (no separators / mixed case).
         var thumbprintPrefix = thumbprintConfigured
-            ? thumbprint[..Math.Min(8, thumbprint.Length)]
+            ? RemoteServiceOptionsValidator.FormatThumbprintPrefix(thumbprint)
             : "(none)";
+        if (thumbprintConfigured && thumbprintPrefix.Length == 0)
+        {
+            thumbprintPrefix = "(invalid)";
+        }
 
         logger.LogInformation(
             "Remote configuration: Environment={Environment}, ContentRoot={ContentRoot}, DevelopmentSettingsPresent={DevelopmentSettingsPresent}, EndpointConfigured={EndpointConfigured}, Host={Host}, Port={Port}, TlsHostName={TlsHostName}, ClientCertificateThumbprintConfigured={ClientCertificateThumbprintConfigured}, ClientCertificateThumbprintPrefix={ClientCertificateThumbprintPrefix}",

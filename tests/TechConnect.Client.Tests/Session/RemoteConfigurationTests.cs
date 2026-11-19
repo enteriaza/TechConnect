@@ -8,6 +8,7 @@
 // -----------------------------------------------------------------------------
 
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using TechConnect.Client.Configuration;
 using TechConnect.Client.Models;
 using TechConnect.Client.Tests.Support;
@@ -83,8 +84,9 @@ public sealed class RemoteConfigurationTests
         await Task.Delay(30);
 
         h.ReconnectLogger.Entries.Should().Contain(e =>
-            e.Exception != null &&
-            e.Message.Contains("failed", StringComparison.OrdinalIgnoreCase));
+            e.Level == LogLevel.Error &&
+            e.Exception is InvalidOperationException &&
+            e.Message.Contains("Unexpected remote connect failure", StringComparison.Ordinal));
     }
 }
 

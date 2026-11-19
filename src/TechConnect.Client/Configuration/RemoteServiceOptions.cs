@@ -233,8 +233,8 @@ public sealed class ReconnectOptions
     /// <summary>
     /// Maximum reconnect delay in seconds after repeated failures.
     /// </summary>
-    /// <value>Defaults to 60; must be at least 1 and ≥ <see cref="InitialDelaySeconds"/>.</value>
-    public int MaxDelaySeconds { get; set; } = 60;
+    /// <value>Defaults to 30; must be at least 1 and ≥ <see cref="InitialDelaySeconds"/>.</value>
+    public int MaxDelaySeconds { get; set; } = 30;
 
     /// <summary>
     /// Multiplier applied to the current delay after each failed attempt.

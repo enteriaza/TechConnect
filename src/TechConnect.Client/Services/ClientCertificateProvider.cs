@@ -110,11 +110,12 @@ internal sealed class ClientCertificateProvider : IClientCertificateProvider
         }
 
         var storeLocation = certificateOptions.StoreLocation;
+        var thumbprintPrefix = RemoteServiceOptionsValidator.FormatThumbprintPrefix(thumbprint);
         _logger.LogInformation(
-            "Looking up client certificate in {StoreLocation}\\{StoreName} by thumbprint {ThumbprintPrefix}…",
+            "Looking up client certificate in {StoreLocation}\\{StoreName} by thumbprint {ThumbprintPrefix}",
             storeLocation,
             storeName,
-            thumbprint[..Math.Min(8, thumbprint.Length)]);
+            thumbprintPrefix);
 
         IReadOnlyList<X509Certificate2> candidates;
         try
@@ -156,10 +157,10 @@ internal sealed class ClientCertificateProvider : IClientCertificateProvider
         var owned = new X509Certificate2(selected);
 
         _logger.LogInformation(
-            "Selected client certificate Subject={Subject} Issuer={Issuer} ThumbprintPrefix={ThumbprintPrefix}… NotBefore={NotBefore:u} NotAfter={NotAfter:u} HasPrivateKey={HasPrivateKey} Store={StoreLocation}\\{StoreName}",
+            "Selected client certificate Subject={Subject} Issuer={Issuer} ThumbprintPrefix={ThumbprintPrefix} NotBefore={NotBefore:u} NotAfter={NotAfter:u} HasPrivateKey={HasPrivateKey} Store={StoreLocation}\\{StoreName}",
             owned.Subject,
             owned.Issuer,
-            thumbprint[..Math.Min(8, thumbprint.Length)],
+            thumbprintPrefix,
             owned.NotBefore.ToUniversalTime(),
             owned.NotAfter.ToUniversalTime(),
             owned.HasPrivateKey,

@@ -7,6 +7,7 @@
 //
 // -----------------------------------------------------------------------------
 
+using System.Net.Sockets;
 using FluentAssertions;
 using Microsoft.Extensions.Time.Testing;
 using TechConnect.Client.Configuration;
@@ -26,11 +27,13 @@ public sealed class ReconnectCoordinatorTests
     /// </summary>
     private static RemoteServiceOptions CreateOptions(
         int initialDelaySeconds = 2,
-        int maxDelaySeconds = 60,
+        int maxDelaySeconds = 30,
         double backoffMultiplier = 2.0,
         double jitterFactor = 0.2) =>
         new()
         {
+            Host = "127.0.0.1",
+            Port = 9443,
             Reconnect = new ReconnectOptions
             {
                 InitialDelaySeconds = initialDelaySeconds,
@@ -39,6 +42,19 @@ public sealed class ReconnectCoordinatorTests
                 JitterFactor = jitterFactor
             }
         };
+
+    /// <summary>
+    /// Parses retry delays logged by <see cref="ReconnectCoordinator"/>.
+    /// </summary>
+    private static IReadOnlyList<double> LoggedRetryDelays(CollectingLogger<ReconnectCoordinator> logger) =>
+        logger.Entries
+            .Select(e => System.Text.RegularExpressions.Regex.Match(
+                e.Message,
+                @"retrying in (?<delay>\d+(?:\.\d+)?)s",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            .Where(m => m.Success)
+            .Select(m => double.Parse(m.Groups["delay"].Value, System.Globalization.CultureInfo.InvariantCulture))
+            .ToArray();
 
     /// <summary>
     /// Creates a ReconnectCoordinator over fake time, options, jitter, and logger.
@@ -158,8 +174,9 @@ public sealed class ReconnectCoordinatorTests
     public async Task Delay_IsCappedAtMaxDelay()
     {
         var time = new FakeTimeProvider();
+        var logger = new CollectingLogger<ReconnectCoordinator>();
         var options = CreateOptions(initialDelaySeconds: 2, maxDelaySeconds: 8, backoffMultiplier: 2.0, jitterFactor: 0);
-        var coordinator = CreateCoordinator(time, options, new FixedJitterProvider(0.5));
+        var coordinator = CreateCoordinator(time, options, new FixedJitterProvider(0.5), logger);
         var attempts = 0;
         using var cts = new CancellationTokenSource();
 
@@ -185,6 +202,109 @@ public sealed class ReconnectCoordinatorTests
 
         attempts.Should().BeGreaterThanOrEqualTo(5);
         coordinator.IsRunning.Should().BeFalse();
+        LoggedRetryDelays(logger).Should().OnlyContain(d => d <= 8.0);
+        LoggedRetryDelays(logger).Should().Contain(d => d == 8.0);
+    }
+
+    /// <summary>
+    /// Scenario: production defaults for reconnect timing.
+    /// Expected: initial delay 2s, max delay 30s.
+    /// </summary>
+    [Fact]
+    public void DefaultReconnectOptions_InitialTwoSeconds_MaxThirtySeconds()
+    {
+        var reconnect = new ReconnectOptions();
+        reconnect.InitialDelaySeconds.Should().Be(2);
+        reconnect.MaxDelaySeconds.Should().Be(30);
+        reconnect.BackoffMultiplier.Should().Be(2.0);
+        reconnect.JitterFactor.Should().Be(0.2);
+    }
+
+    /// <summary>
+    /// Scenario: exponential growth under the 30s ceiling with zero jitter.
+    /// Expected: 2 → 4 → 8 → 16 → 30 → 30 …
+    /// </summary>
+    [Fact]
+    public async Task ExponentialBackoff_ReachesThirtySecondCeiling()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CollectingLogger<ReconnectCoordinator>();
+        var options = CreateOptions(initialDelaySeconds: 2, maxDelaySeconds: 30, backoffMultiplier: 2.0, jitterFactor: 0);
+        var coordinator = CreateCoordinator(time, options, new FixedJitterProvider(0.5), logger);
+        var attempts = 0;
+        using var cts = new CancellationTokenSource();
+
+        var run = coordinator.RunAsync(_ =>
+        {
+            Interlocked.Increment(ref attempts);
+            return Task.FromException(new RemoteTransportUnavailableException("down"));
+        }, cts.Token);
+
+        await TestHelpers.AdvanceUntilAsync(
+            time,
+            () => attempts >= 7,
+            step: TimeSpan.FromSeconds(1),
+            timeout: TimeSpan.FromSeconds(30));
+
+        cts.Cancel();
+        await TestHelpers.AdvanceUntilAsync(
+            time,
+            () => run.IsCompleted,
+            step: TimeSpan.FromSeconds(1),
+            timeout: TimeSpan.FromSeconds(5));
+        await run;
+
+        var delays = LoggedRetryDelays(logger);
+        delays.Should().HaveCountGreaterThanOrEqualTo(6);
+        delays[0].Should().Be(2.0);
+        delays[1].Should().Be(4.0);
+        delays[2].Should().Be(8.0);
+        delays[3].Should().Be(16.0);
+        delays[4].Should().Be(30.0);
+        delays.Skip(4).Should().OnlyContain(d => d == 30.0);
+        delays.Should().OnlyContain(d => d <= 30.0);
+        attempts.Should().BeGreaterThanOrEqualTo(7);
+    }
+
+    /// <summary>
+    /// Scenario: maximum positive jitter at the 30s base.
+    /// Expected: effective delay stays ≤ 30s (post-jitter cap).
+    /// </summary>
+    [Fact]
+    public async Task PositiveJitter_CannotExceedThirtySecondCeiling()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CollectingLogger<ReconnectCoordinator>();
+        // NextDouble=1 => +20% jitter; without a post-jitter cap, 30 * 1.2 = 36s.
+        var options = CreateOptions(initialDelaySeconds: 30, maxDelaySeconds: 30, backoffMultiplier: 2.0, jitterFactor: 0.2);
+        var coordinator = CreateCoordinator(time, options, new FixedJitterProvider(1.0), logger);
+        var attempts = 0;
+        using var cts = new CancellationTokenSource();
+
+        var run = coordinator.RunAsync(_ =>
+        {
+            if (Interlocked.Increment(ref attempts) >= 3)
+            {
+                cts.Cancel();
+            }
+
+            return Task.FromException(new RemoteTransportUnavailableException("down"));
+        }, cts.Token);
+
+        await TestHelpers.WaitUntilAsync(() => attempts >= 1);
+        time.Advance(TimeSpan.FromSeconds(30));
+        await TestHelpers.WaitUntilAsync(() => attempts >= 2 || cts.IsCancellationRequested);
+        time.Advance(TimeSpan.FromSeconds(30));
+        await TestHelpers.AdvanceUntilAsync(
+            time,
+            () => run.IsCompleted,
+            step: TimeSpan.FromSeconds(1),
+            timeout: TimeSpan.FromSeconds(5));
+        await run;
+
+        LoggedRetryDelays(logger).Should().NotBeEmpty()
+            .And.OnlyContain(d => d <= 30.0);
+        LoggedRetryDelays(logger).Should().Contain(d => d == 30.0);
     }
 
     /// <summary>
@@ -397,15 +517,18 @@ public sealed class ReconnectCoordinatorTests
     }
 
     /// <summary>
-    /// Scenario: transient connect exception.
-    /// Expected: logger records the exception object.
+    /// Scenario: unexpected connect exception (not a transport/socket failure).
+    /// Expected: logger records the exception object at Error.
     /// </summary>
     [Fact]
-    public async Task TransientException_LogsExceptionObject()
+    public async Task UnexpectedException_LogsExceptionObjectAtError()
     {
         var time = new FakeTimeProvider();
         var logger = new CollectingLogger<ReconnectCoordinator>();
-        var coordinator = CreateCoordinator(time, CreateOptions(initialDelaySeconds: 1, jitterFactor: 0), logger: logger);
+        var options = CreateOptions(initialDelaySeconds: 1, jitterFactor: 0);
+        options.Host = "127.0.0.1";
+        options.Port = 9443;
+        var coordinator = CreateCoordinator(time, options, logger: logger);
         using var cts = new CancellationTokenSource();
         var attempts = 0;
 
@@ -424,9 +547,148 @@ public sealed class ReconnectCoordinatorTests
         await run;
 
         logger.Entries.Should().Contain(e =>
+            e.Level == Microsoft.Extensions.Logging.LogLevel.Error &&
             e.Exception != null &&
             e.Exception.GetType() == typeof(InvalidOperationException) &&
-            e.Message.Contains("failed", StringComparison.OrdinalIgnoreCase));
+            e.Message.Contains("Unexpected remote connect failure", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Scenario: connection refused wrapped as RemoteTransportException.
+    /// Expected: single concise Warning without exception object; attempt and delay present.
+    /// </summary>
+    [Fact]
+    public async Task ConnectionRefused_LogsConciseWarning_WithoutException()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CollectingLogger<ReconnectCoordinator>();
+        var options = CreateOptions(initialDelaySeconds: 2, jitterFactor: 0);
+        options.Host = "127.0.0.1";
+        options.Port = 9443;
+        var coordinator = CreateCoordinator(time, options, logger: logger);
+        using var cts = new CancellationTokenSource();
+        var attempts = 0;
+
+        var run = coordinator.RunAsync(_ =>
+        {
+            if (Interlocked.Increment(ref attempts) >= 2)
+            {
+                cts.Cancel();
+            }
+
+            return Task.FromException(new RemoteTransportException(
+                "Unable to connect to 127.0.0.1:9443.",
+                new SocketException((int)SocketError.ConnectionRefused)));
+        }, cts.Token);
+
+        await TestHelpers.WaitUntilAsync(() => attempts >= 1);
+        time.Advance(TimeSpan.FromSeconds(2));
+        await run;
+
+        var warnings = logger.Entries
+            .Where(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
+            .Where(e => e.Message.Contains("Connection refused", StringComparison.Ordinal))
+            .ToList();
+
+        warnings.Should().ContainSingle();
+        warnings[0].Exception.Should().BeNull();
+        warnings[0].Message.Should().Contain("127.0.0.1:9443");
+        warnings[0].Message.Should().Contain("Attempt 1");
+        warnings[0].Message.Should().MatchRegex(@"retrying in 2\.0s");
+        logger.Entries.Count(e => e.Exception != null).Should().Be(0);
+    }
+
+    /// <summary>
+    /// Scenario: connect timeout as RemoteTransportException without SocketException.
+    /// Expected: concise Warning with Connection timed out; no exception object.
+    /// </summary>
+    [Fact]
+    public async Task ConnectionTimeout_LogsConciseWarning_WithoutException()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CollectingLogger<ReconnectCoordinator>();
+        var options = CreateOptions(initialDelaySeconds: 1, jitterFactor: 0);
+        options.Host = "10.0.0.1";
+        options.Port = 9443;
+        var coordinator = CreateCoordinator(time, options, logger: logger);
+        using var cts = new CancellationTokenSource();
+        var attempts = 0;
+
+        var run = coordinator.RunAsync(_ =>
+        {
+            if (Interlocked.Increment(ref attempts) >= 2)
+            {
+                cts.Cancel();
+            }
+
+            return Task.FromException(new RemoteTransportException("TCP/mTLS connect timed out after 30s."));
+        }, cts.Token);
+
+        await TestHelpers.WaitUntilAsync(() => attempts >= 1);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await run;
+
+        var warnings = logger.Entries
+            .Where(e => e.Level == Microsoft.Extensions.Logging.LogLevel.Warning)
+            .Where(e => e.Message.Contains("Connection timed out", StringComparison.Ordinal))
+            .ToList();
+
+        warnings.Should().ContainSingle();
+        warnings[0].Exception.Should().BeNull();
+        warnings[0].Message.Should().Contain("10.0.0.1:9443");
+        warnings[0].Message.Should().Contain("Attempt 1");
+    }
+
+    /// <summary>
+    /// Scenario: cancel during backoff after an expected failure.
+    /// Expected: cancellation log only; no additional failure warning for cancel.
+    /// </summary>
+    [Fact]
+    public async Task Cancellation_DoesNotLogConnectionFailureWarning()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CollectingLogger<ReconnectCoordinator>();
+        var options = CreateOptions(initialDelaySeconds: 30, jitterFactor: 0);
+        options.Host = "127.0.0.1";
+        options.Port = 9443;
+        var coordinator = CreateCoordinator(time, options, logger: logger);
+
+        using var cts = new CancellationTokenSource();
+        var run = coordinator.RunAsync(
+            _ => Task.FromException(new RemoteTransportUnavailableException("down")),
+            cts.Token);
+
+        await TestHelpers.WaitUntilAsync(() =>
+            logger.Entries.Any(e => e.Message.Contains("failed", StringComparison.OrdinalIgnoreCase)));
+
+        cts.Cancel();
+        time.Advance(TimeSpan.FromSeconds(1));
+        await run;
+
+        logger.Entries.Should().Contain(e =>
+            e.Message.Contains("cancelled", StringComparison.OrdinalIgnoreCase));
+        logger.Entries.Count(e =>
+                e.Level == Microsoft.Extensions.Logging.LogLevel.Warning &&
+                e.Message.Contains("failed", StringComparison.OrdinalIgnoreCase))
+            .Should().Be(1, because: "only the connect failure is warned; cancel is informational");
+    }
+
+    /// <summary>
+    /// Scenario: reason formatting for common socket errors.
+    /// Expected: stable human-readable phrases without exception type names.
+    /// </summary>
+    [Theory]
+    [InlineData(SocketError.ConnectionRefused, "Connection refused")]
+    [InlineData(SocketError.TimedOut, "Connection timed out")]
+    [InlineData(SocketError.HostUnreachable, "Host unreachable")]
+    [InlineData(SocketError.NetworkUnreachable, "Network unreachable")]
+    public void FormatConnectFailureReason_MapsSocketErrors(SocketError code, string expected)
+    {
+        var ex = new RemoteTransportException(
+            "Unable to connect.",
+            new SocketException((int)code));
+        ReconnectCoordinator.FormatConnectFailureReason(ex).Should().Be(expected);
+        ReconnectCoordinator.IsExpectedConnectFailure(ex).Should().BeTrue();
     }
 
     /// <summary>

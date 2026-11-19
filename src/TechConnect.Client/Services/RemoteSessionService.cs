@@ -543,11 +543,8 @@ internal sealed class RemoteSessionService : IRemoteSessionService
         }
         catch (RemoteTransportConfigurationException ex)
         {
+            // Permanent — reconnect coordinator owns the single configuration-error log.
             SetState(RemoteSessionState.Error, error: ex.Message);
-            _logger.LogWarning(
-                "Remote transport configuration error. ClientSessionId={ClientSessionId}. {Reason}",
-                SessionId,
-                ex.Message);
             throw;
         }
         catch (RemoteTransportUnavailableException ex)
@@ -555,19 +552,21 @@ internal sealed class RemoteSessionService : IRemoteSessionService
             SetState(
                 attempt == 1 ? RemoteSessionState.WaitingForRemoteService : RemoteSessionState.Reconnecting,
                 error: ex.Message);
-            // Transient — reconnect coordinator backs off and retries.
+            // Transient — reconnect coordinator owns the single connect-failure log.
             throw;
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception)
         {
+            // Expected socket/TLS connect failures arrive as RemoteTransportException and are
+            // logged once by ReconnectCoordinator (no stack trace). Unexpected exceptions are
+            // also logged only there so this layer does not duplicate.
             SetState(
                 attempt == 1 ? RemoteSessionState.WaitingForRemoteService : RemoteSessionState.Reconnecting,
                 error: "Remote connection failed.");
-            _logger.LogWarning(ex, "Remote transport connect failed. ClientSessionId={ClientSessionId}", SessionId);
             throw;
         }
 

@@ -282,6 +282,7 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
             }
             catch (SocketException ex)
             {
+                // Wrap without logging — ReconnectCoordinator owns the concise per-attempt failure log.
                 throw new RemoteTransportException(
                     $"Unable to connect to {options.Host}:{options.Port}.",
                     ex);

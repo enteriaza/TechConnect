@@ -146,6 +146,46 @@ public sealed class RemoteServiceOptionsValidator : IValidateOptions<RemoteServi
             .ToUpperInvariant();
 
     /// <summary>
+    /// Formats a short uppercase hexadecimal thumbprint prefix for diagnostics.
+    /// </summary>
+    /// <param name="thumbprint">
+    /// Raw or normalized thumbprint. Separators and casing are normalized before slicing.
+    /// </param>
+    /// <param name="length">Maximum prefix length (default 8).</param>
+    /// <returns>
+    /// Up to <paramref name="length"/> uppercase ASCII hex digits, or empty when
+    /// <paramref name="thumbprint"/> has no hex content after normalization.
+    /// </returns>
+    /// <remarks>
+    /// Use only ASCII hex in log templates. Do not append Unicode ellipsis characters to
+    /// thumbprint log messages — non-Unicode console encodings render them as replacement
+    /// characters (U+FFFD), which looks like corruption of the thumbprint itself.
+    /// </remarks>
+    internal static string FormatThumbprintPrefix(string thumbprint, int length = 8)
+    {
+        ArgumentNullException.ThrowIfNull(thumbprint);
+        if (length < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(length), length, "Prefix length must be at least 1.");
+        }
+
+        var normalized = NormalizeThumbprint(thumbprint);
+        if (normalized.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        // Defensive: never emit non-hex into logs even if a caller skipped validation.
+        var hexOnly = new string(normalized.Where(char.IsAsciiHexDigit).ToArray());
+        if (hexOnly.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return hexOnly[..Math.Min(length, hexOnly.Length)].ToUpperInvariant();
+    }
+
+    /// <summary>
     /// Returns whether <paramref name="host"/> is a reserved example/placeholder DNS name.
     /// </summary>
     /// <param name="host">Host name to test.</param>

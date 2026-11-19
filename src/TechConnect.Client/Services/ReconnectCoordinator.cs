@@ -7,6 +7,7 @@
 //
 // -----------------------------------------------------------------------------
 
+using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TechConnect.Client.Abstractions;
@@ -24,6 +25,8 @@ namespace TechConnect.Client.Services;
 /// <see cref="RemoteTransportConfigurationException"/>. Successful return from the
 /// attempt means the transport session ran and then ended; backoff is reset before
 /// the next reconnect. Transient failures delay via <see cref="NextDelay"/>.
+/// This type owns the single per-attempt connect-failure log (concise warning for
+/// expected socket/transport failures; error with exception for unexpected faults).
 /// </para>
 /// <para>
 /// Only one <see cref="RunAsync"/> may be active on an instance at a time
@@ -106,7 +109,7 @@ internal sealed class ReconnectCoordinator : IReconnectCoordinator
 
                 try
                 {
-                    _logger.LogInformation(
+                    _logger.LogDebug(
                         "{AttemptKind} attempt {Attempt}",
                         isReconnect ? "Remote reconnect" : "Remote connect",
                         attempt);
@@ -141,11 +144,7 @@ internal sealed class ReconnectCoordinator : IReconnectCoordinator
                     }
 
                     var delay = NextDelay();
-                    _logger.LogInformation(
-                        ex,
-                        "Remote connect attempt {Attempt} failed; retrying in {DelaySeconds:0.0}s",
-                        attempt,
-                        delay.TotalSeconds);
+                    LogConnectAttemptFailure(ex, attempt, delay);
 
                     try
                     {
@@ -181,11 +180,136 @@ internal sealed class ReconnectCoordinator : IReconnectCoordinator
     }
 
     /// <summary>
+    /// Emits the single connect-failure log for this attempt (expected = concise warning, unexpected = error with exception).
+    /// </summary>
+    /// <param name="ex">Failure thrown by the connect attempt.</param>
+    /// <param name="attempt">1-based attempt number.</param>
+    /// <param name="delay">Backoff delay before the next retry.</param>
+    private void LogConnectAttemptFailure(Exception ex, int attempt, TimeSpan delay)
+    {
+        var options = _options.Value;
+        var host = string.IsNullOrWhiteSpace(options.Host) ? "(unconfigured)" : options.Host.Trim();
+        var port = options.Port;
+
+        if (IsExpectedConnectFailure(ex))
+        {
+            // Do not pass the exception object — avoids stack traces for ordinary reconnect noise.
+            _logger.LogWarning(
+                "Remote connection to {Host}:{Port} failed: {Reason}. Attempt {Attempt}; retrying in {DelaySeconds:0.0}s.",
+                host,
+                port,
+                FormatConnectFailureReason(ex),
+                attempt,
+                delay.TotalSeconds);
+            return;
+        }
+
+        _logger.LogError(
+            ex,
+            "Unexpected remote connect failure to {Host}:{Port} on attempt {Attempt}; retrying in {DelaySeconds:0.0}s.",
+            host,
+            port,
+            attempt,
+            delay.TotalSeconds);
+    }
+
+    /// <summary>
+    /// Returns whether <paramref name="ex"/> is an ordinary operational connect failure.
+    /// </summary>
+    /// <remarks>
+    /// Socket/TLS connect failures from the transport are wrapped as
+    /// <see cref="RemoteTransportException"/> or <see cref="RemoteTransportUnavailableException"/>.
+    /// Does not treat arbitrary <see cref="Exception"/> as expected.
+    /// </remarks>
+    internal static bool IsExpectedConnectFailure(Exception ex)
+    {
+        if (ex is RemoteTransportUnavailableException or RemoteTransportException or SocketException)
+        {
+            return true;
+        }
+
+        // Some platforms surface connect failures as IOException wrapping SocketException.
+        return FindSocketException(ex) is not null && ex is IOException;
+    }
+
+    /// <summary>
+    /// Builds a short technician-facing reason without stack traces or exception type names.
+    /// </summary>
+    internal static string FormatConnectFailureReason(Exception ex)
+    {
+        var socket = FindSocketException(ex);
+        if (socket is not null)
+        {
+            return FormatSocketError(socket);
+        }
+
+        if (ex is RemoteTransportUnavailableException unavailable)
+        {
+            return string.IsNullOrWhiteSpace(unavailable.Message)
+                ? "Remote endpoint unavailable"
+                : unavailable.Message;
+        }
+
+        if (ex is RemoteTransportException remote)
+        {
+            if (remote.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Connection timed out";
+            }
+
+            return string.IsNullOrWhiteSpace(remote.Message)
+                ? "Remote connection failed"
+                : remote.Message;
+        }
+
+        return string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+    }
+
+    /// <summary>
+    /// Maps <see cref="SocketError"/> values to concise human-readable phrases.
+    /// </summary>
+    internal static string FormatSocketError(SocketException ex) =>
+        ex.SocketErrorCode switch
+        {
+            SocketError.ConnectionRefused => "Connection refused",
+            SocketError.TimedOut => "Connection timed out",
+            SocketError.HostUnreachable => "Host unreachable",
+            SocketError.NetworkUnreachable => "Network unreachable",
+            SocketError.NetworkDown => "Network down",
+            SocketError.AddressNotAvailable => "Address not available",
+            SocketError.HostNotFound => "Host not found",
+            SocketError.TryAgain => "Temporary name resolution failure",
+            SocketError.ConnectionReset => "Connection reset",
+            SocketError.Shutdown => "Connection shutdown",
+            _ => string.IsNullOrWhiteSpace(ex.Message)
+                ? ex.SocketErrorCode.ToString()
+                : ex.Message.TrimEnd('.')
+        };
+
+    /// <summary>
+    /// Walks inner exceptions for a <see cref="SocketException"/>.
+    /// </summary>
+    private static SocketException? FindSocketException(Exception ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SocketException socket)
+            {
+                return socket;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Computes the delay for the current failure and advances the exponential base.
     /// </summary>
     /// <returns>
     /// Delay of <c>baseSeconds + jitter</c> where jitter is symmetric in
-    /// <c>± baseSeconds * JitterFactor</c> (factor clamped to [0,1]), floored at zero.
+    /// <c>± baseSeconds * JitterFactor</c> (factor clamped to [0,1]), floored at zero,
+    /// then capped at <see cref="ReconnectOptions.MaxDelaySeconds"/> so jitter cannot
+    /// push the effective wait above the configured ceiling.
     /// The stored base is then updated to
     /// <c>min(MaxDelaySeconds, max(InitialDelaySeconds, current * BackoffMultiplier))</c>
     /// for the next failure.
@@ -197,12 +321,13 @@ internal sealed class ReconnectCoordinator : IReconnectCoordinator
     private TimeSpan NextDelay()
     {
         var reconnect = _options.Value.Reconnect;
+        var maxDelaySeconds = Math.Max(1, reconnect.MaxDelaySeconds);
         double baseSeconds;
         lock (_gate)
         {
             baseSeconds = _currentDelaySeconds;
             var next = Math.Min(
-                reconnect.MaxDelaySeconds,
+                maxDelaySeconds,
                 Math.Max(reconnect.InitialDelaySeconds, _currentDelaySeconds * reconnect.BackoffMultiplier));
             _currentDelaySeconds = next;
         }
@@ -213,7 +338,8 @@ internal sealed class ReconnectCoordinator : IReconnectCoordinator
             ? 0
             : (_jitterProvider.NextDouble() * 2.0 - 1.0) * jitterRange;
 
-        var delayed = Math.Max(0, baseSeconds + jitter);
+        // Cap after jitter so positive jitter cannot exceed MaxDelaySeconds.
+        var delayed = Math.Min(maxDelaySeconds, Math.Max(0, baseSeconds + jitter));
         return TimeSpan.FromSeconds(delayed);
     }
 }

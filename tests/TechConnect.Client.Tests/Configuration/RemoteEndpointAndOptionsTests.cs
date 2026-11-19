@@ -158,6 +158,34 @@ public sealed class RemoteEndpointAndOptionsTests
     }
 
     /// <summary>
+    /// Scenario: format diagnostic thumbprint prefix.
+    /// Expected: uppercase hex only, max 8 chars, no Unicode ellipsis/replacement.
+    /// </summary>
+    [Fact]
+    public void FormatThumbprintPrefix_IsUppercaseHexOnly()
+    {
+        var prefix = RemoteServiceOptionsValidator.FormatThumbprintPrefix(
+            "fc:f5:f3:2c:ab:cd:ef:01:23:45:67:89:0a:bc:de:f0:12:34:56:78");
+
+        prefix.Should().Be("FCF5F32C");
+        prefix.Should().MatchRegex("^[0-9A-F]+$");
+        prefix.Should().NotContain("\uFFFD");
+        prefix.Should().NotContain("\u2026");
+        prefix.Length.Should().Be(8);
+    }
+
+    /// <summary>
+    /// Scenario: whitespace-only / empty thumbprint prefix.
+    /// Expected: empty string.
+    /// </summary>
+    [Fact]
+    public void FormatThumbprintPrefix_Empty_ReturnsEmpty()
+    {
+        RemoteServiceOptionsValidator.FormatThumbprintPrefix("   ").Should().BeEmpty();
+        RemoteServiceOptionsValidator.FormatThumbprintPrefix(string.Empty).Should().BeEmpty();
+    }
+
+    /// <summary>
     /// Scenario: remote marked unconfigured/unavailable.
     /// Expected: transport ConnectAsync is never attempted.
     /// </summary>
