@@ -665,14 +665,22 @@ public sealed class EnableDisablePrivilegeTests
             attachment.BytesToOperator.Should().BeGreaterThanOrEqualTo(rx.Length);
 
             // Admin commands remain denied at level 1.
+            // Count prior "still attached" markers so the wait does not succeed on the first detach.
+            int stillAttachedBefore;
+            lock (output)
+            {
+                stillAttachedBefore = CountOccurrences(output.ToString(), "still attached");
+            }
+
             await pipe.Client.WriteAsync(new byte[] { TechConnectCliDispatcher.DetachControlByte }, cts.Token);
             await WaitForAsync(() =>
             {
                 lock (output)
                 {
-                    return output.ToString().Contains("still attached", StringComparison.Ordinal);
+                    return CountOccurrences(output.ToString(), "still attached") > stillAttachedBefore;
                 }
             });
+            await WaitForAsync(() => !attachment.IsTerminalActive);
             await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("show serial\r"), cts.Token);
             await WaitForAsync(() =>
             {

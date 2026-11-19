@@ -210,6 +210,105 @@ public sealed class ConnectorSessionRegistryTests
     }
 
     /// <summary>
+    /// Scenario: concurrent TouchActivity and List while another connection registers.
+    /// Expected: no exceptions; each session retains a progressive activity timestamp.
+    /// </summary>
+    [Fact]
+    public void TouchActivity_ConcurrentWithRegisterAndList_IsSafe()
+    {
+        var registry = new ConnectorSessionRegistry();
+        var sessions = new ConnectorSession[32];
+        for (var i = 0; i < sessions.Length; i++)
+        {
+            sessions[i] = registry.TryRegister($"ID-{i}", $"conn-{i}", null, null, null, "COM1", null, T0).Session!;
+        }
+
+        Parallel.For(0, sessions.Length, i =>
+        {
+            for (var n = 0; n < 1_000; n++)
+            {
+                registry.TouchActivity(sessions[i].ConnectionId, T0.AddMilliseconds(n + 1));
+                if ((n & 63) == 0)
+                {
+                    _ = registry.List();
+                }
+            }
+        });
+
+        foreach (var session in sessions)
+        {
+            session.LastActivityUtc.Should().NotBeNull();
+            session.LastActivityUtc!.Value.Should().BeAfter(T0);
+        }
+
+        registry.Count.Should().Be(sessions.Length);
+    }
+
+    /// <summary>
+    /// Scenario: LastActivityUtc updated via cached session reference without registry.TouchActivity.
+    /// Expected: snapshot List observes the updated timestamp (PERF-SRV-02 hot path).
+    /// </summary>
+    [Fact]
+    public void CachedSession_LastActivityWrite_VisibleInListSnapshot()
+    {
+        var registry = new ConnectorSessionRegistry();
+        var session = registry.TryRegister("ID1", "c1", null, null, null, "COM1", null, T0).Session!;
+        var later = T0.AddSeconds(30);
+
+        // Mirrors ConnectorListenerHostedService updating connection.RegisteredSession.
+        session.ObserveActivity(later);
+
+        registry.List().Single().LastActivityUtc.Should().Be(later);
+    }
+
+    /// <summary>
+    /// Scenario: concurrent ObserveActivity with increasing and decreasing candidates.
+    /// Expected: final timestamp equals the maximum observed value (never moves backwards).
+    /// </summary>
+    [Fact]
+    public void ObserveActivity_ConcurrentWriters_PreservesMaximum()
+    {
+        var registry = new ConnectorSessionRegistry();
+        var session = registry.TryRegister("ID1", "c1", null, null, null, "COM1", null, T0).Session!;
+        var max = T0.AddMilliseconds(5_000);
+
+        Parallel.For(0, 8, t =>
+        {
+            for (var i = 0; i <= 5_000; i++)
+            {
+                // Mix newer and older candidates across threads.
+                var candidate = t % 2 == 0
+                    ? T0.AddMilliseconds(i)
+                    : T0.AddMilliseconds(5_000 - i);
+                session.ObserveActivity(candidate);
+            }
+        });
+
+        session.LastActivityUtc.Should().Be(max);
+    }
+
+    /// <summary>
+    /// Scenario: TouchActivity after unregister.
+    /// Expected: no-op; cannot resurrect or mutate a replacement session under a reused id.
+    /// </summary>
+    [Fact]
+    public void TouchActivity_AfterUnregister_DoesNotResurrect()
+    {
+        var registry = new ConnectorSessionRegistry();
+        var first = registry.TryRegister("ID1", "c1", null, null, null, "COM1", null, T0).Session!;
+        registry.TryUnregisterByConnectionId("c1", out _).Should().BeTrue();
+
+        registry.TouchActivity("c1", T0.AddHours(1));
+        first.LastActivityUtc.Should().Be(T0);
+
+        var second = registry.TryRegister("ID1", "c2", null, null, null, "COM1", null, T0.AddMinutes(1)).Session!;
+        registry.TouchActivity("c1", T0.AddHours(2)); // old connection id
+        second.LastActivityUtc.Should().Be(T0.AddMinutes(1));
+        registry.TouchActivity("c2", T0.AddHours(3));
+        second.LastActivityUtc.Should().Be(T0.AddHours(3));
+    }
+
+    /// <summary>
     /// Verifies <see cref="ConnectorSessionRegistry.ClearAll"/> empties all indexes.
     /// </summary>
     [Fact]

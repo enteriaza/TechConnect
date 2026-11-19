@@ -575,6 +575,10 @@ internal sealed class ConnectorListenerHostedService : BackgroundService
                         });
                 }
 
+                // Drop the hot-path cache after protocol loop exit / unregister (PERF-SRV-02).
+                tracked.RegisteredSession = null;
+                tracked.RegisteredSessionId = null;
+
                 _tracker.TryRemove(tracked.ConnectionId, out _);
                 _logger.LogInformation(
                     "Connector disconnected. ConnectionId={ConnectionId}, ThumbprintPrefix={ThumbprintPrefix}…, Remote={RemoteEndPoint}",
@@ -633,10 +637,8 @@ internal sealed class ConnectorListenerHostedService : BackgroundService
                     return;
                 }
 
-                if (connection.RegisteredSessionId is not null)
-                {
-                    _sessionRegistry.TouchActivity(connection.ConnectionId, _timeProvider.GetUtcNow());
-                }
+                // PERF-SRV-02: advance LastActivityUtc on the cached session without the registry gate.
+                connection.RegisteredSession?.ObserveActivity(_timeProvider.GetUtcNow());
 
                 switch (frame.Value.MessageType)
                 {
@@ -697,7 +699,10 @@ internal sealed class ConnectorListenerHostedService : BackgroundService
     /// Forwards SerialData payload into the attachment outbound queue when registered and attached.
     /// </summary>
     /// <param name="connection">Source connection.</param>
-    /// <param name="frame">SerialData frame; payload ownership follows protocol transfer rules.</param>
+    /// <param name="frame">
+    /// SerialData frame; on enqueue success payload ownership transfers into the operator
+    /// outbound queue (PERF-SRV-01). On discard/overflow the frame payload is abandoned.
+    /// </param>
     /// <remarks>
     /// Pre-registration frames are discarded without disconnecting. Overflow detaches the
     /// operator for backpressure; the connector connection remains up.
@@ -711,6 +716,7 @@ internal sealed class ConnectorListenerHostedService : BackgroundService
             return;
         }
 
+        // Transfer FrameReader payload ownership into the queue (no second ToArray copy).
         var result = _attachmentManager.TryEnqueueDeviceRx(sessionId, frame.Payload);
         if (result == DeviceRxEnqueueResult.Overflow)
         {
@@ -825,6 +831,7 @@ internal sealed class ConnectorListenerHostedService : BackgroundService
 
         var session = registration.Session!;
         connection.RegisteredSessionId = session.SessionId;
+        connection.RegisteredSession = session;
 
         // Seed display cache from Hello-reported settings (connector-authoritative at registration).
         if (hello.BaudRate >= 1)

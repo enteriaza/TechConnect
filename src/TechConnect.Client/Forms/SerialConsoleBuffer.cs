@@ -16,26 +16,39 @@ namespace TechConnect.Client.Forms;
 /// Thread-safe pending-byte buffer between serial RX and the UI-thread terminal host.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Does not affect the underlying serial byte stream used for remote forwarding.
 /// Only <see cref="SerialDataDirection.Rx"/> chunks are enqueued for display.
 /// When the pending display buffer exceeds its soft cap, the oldest pending bytes
 /// are dropped and counted in <see cref="PendingBytesDropped"/> — transport RX is
 /// never discarded by this component. Arbitrary drops can split UTF-8 or VT sequences;
 /// the UI flush path must resynchronize the terminal parser when drops are reported.
+/// </para>
+/// <para>
+/// Storage is a fixed-capacity ring (PERF-CLI-01/02): bulk <see cref="Span{T}"/> copies
+/// on enqueue and O(1) oldest-byte discard on overflow (no per-byte <c>Add</c> and no
+/// <c>RemoveRange</c> element shift).
+/// </para>
 /// </remarks>
 internal sealed class SerialConsoleBuffer
 {
     /// <summary>Default soft cap for undrained display bytes waiting for the UI flush.</summary>
     public const int DefaultMaxPendingBytes = 1_048_576;
 
-    /// <summary>Lock protecting pending bytes and drop accounting.</summary>
+    /// <summary>Lock protecting ring indices, count, and drop accounting.</summary>
     private readonly object _gate = new();
 
-    /// <summary>Soft cap on undrained pending display bytes.</summary>
+    /// <summary>Soft cap on undrained pending display bytes (also the ring length).</summary>
     private readonly int _maxPendingBytes;
 
-    /// <summary>Pending RX octets awaiting UI-thread drain into the terminal host.</summary>
-    private readonly List<byte> _pending = new();
+    /// <summary>Fixed ring storage; length equals <see cref="_maxPendingBytes"/>.</summary>
+    private readonly byte[] _ring;
+
+    /// <summary>Index of the oldest pending byte within <see cref="_ring"/>.</summary>
+    private int _head;
+
+    /// <summary>Number of pending bytes currently stored in the ring.</summary>
+    private int _count;
 
     /// <summary>Cumulative pending display bytes dropped because the soft cap was exceeded.</summary>
     private long _pendingBytesDropped;
@@ -55,6 +68,7 @@ internal sealed class SerialConsoleBuffer
         }
 
         _maxPendingBytes = maxPendingBytes;
+        _ring = new byte[maxPendingBytes];
     }
 
     /// <summary>
@@ -71,7 +85,7 @@ internal sealed class SerialConsoleBuffer
         {
             lock (_gate)
             {
-                return _pending.Count;
+                return _count;
             }
         }
     }
@@ -107,14 +121,7 @@ internal sealed class SerialConsoleBuffer
 
         lock (_gate)
         {
-            var span = chunk.Data.Span;
-            EnsureCapacity(span.Length);
-            for (var i = 0; i < span.Length; i++)
-            {
-                _pending.Add(span[i]);
-            }
-
-            TrimOverflow();
+            Append(chunk.Data.Span);
         }
     }
 
@@ -125,7 +132,8 @@ internal sealed class SerialConsoleBuffer
     {
         lock (_gate)
         {
-            _pending.Clear();
+            _head = 0;
+            _count = 0;
         }
     }
 
@@ -144,45 +152,74 @@ internal sealed class SerialConsoleBuffer
             droppedSincePreviousDrain = _pendingBytesDropped;
             _pendingBytesDropped = 0;
 
-            if (_pending.Count == 0)
+            if (_count == 0)
             {
-                data = Array.Empty<byte>();
+                data = [];
                 return false;
             }
 
-            data = _pending.ToArray();
-            _pending.Clear();
+            data = new byte[_count];
+            CopyOut(data);
+            _head = 0;
+            _count = 0;
             return true;
         }
     }
 
     /// <summary>
-    /// Ensures the pending list can accept <paramref name="additional"/> bytes after overflow trim.
+    /// Appends <paramref name="src"/> into the ring, dropping oldest bytes when the soft cap is exceeded.
     /// </summary>
-    /// <param name="additional">Bytes about to be appended.</param>
-    private void EnsureCapacity(int additional)
+    /// <param name="src">RX octets to append (may wrap; may exceed capacity alone).</param>
+    /// <remarks>Must be called while holding <see cref="_gate"/>.</remarks>
+    private void Append(ReadOnlySpan<byte> src)
     {
-        var required = _pending.Count + additional;
-        if (required <= _pending.Capacity)
+        if (src.IsEmpty)
         {
             return;
         }
 
-        _pending.Capacity = Math.Max(required, _pending.Capacity * 2);
+        // Incoming chunk alone fills or exceeds the soft cap: keep only its newest tail.
+        if (src.Length >= _maxPendingBytes)
+        {
+            _pendingBytesDropped += _count + (src.Length - _maxPendingBytes);
+            src = src[^_maxPendingBytes..];
+            src.CopyTo(_ring);
+            _head = 0;
+            _count = _maxPendingBytes;
+            return;
+        }
+
+        var overflow = _count + src.Length - _maxPendingBytes;
+        if (overflow > 0)
+        {
+            _head = (_head + overflow) % _maxPendingBytes;
+            _count -= overflow;
+            _pendingBytesDropped += overflow;
+        }
+
+        var tail = (_head + _count) % _maxPendingBytes;
+        var first = Math.Min(src.Length, _maxPendingBytes - tail);
+        src[..first].CopyTo(_ring.AsSpan(tail));
+        if (first < src.Length)
+        {
+            src[first..].CopyTo(_ring.AsSpan(0));
+        }
+
+        _count += src.Length;
     }
 
     /// <summary>
-    /// Drops oldest pending bytes when the soft cap is exceeded.
+    /// Copies the current pending region into <paramref name="destination"/> in FIFO order.
     /// </summary>
-    private void TrimOverflow()
+    /// <param name="destination">Destination of length <see cref="_count"/>.</param>
+    /// <remarks>Must be called while holding <see cref="_gate"/>.</remarks>
+    private void CopyOut(Span<byte> destination)
     {
-        var overflow = _pending.Count - _maxPendingBytes;
-        if (overflow <= 0)
+        var first = Math.Min(_count, _maxPendingBytes - _head);
+        _ring.AsSpan(_head, first).CopyTo(destination);
+        if (first < _count)
         {
-            return;
+            _ring.AsSpan(0, _count - first).CopyTo(destination[first..]);
         }
-
-        _pending.RemoveRange(0, overflow);
-        _pendingBytesDropped += overflow;
     }
 }

@@ -16,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TechConnect.Protocol;
 using TechConnect.Protocol.Framing;
+using TechConnect.Server.Sessions;
 
 namespace TechConnect.Server.Connector;
 
@@ -125,6 +126,17 @@ internal sealed class ConnectorConnection : IAsyncDisposable
 
     /// <summary>Server session ID after successful Hello registration; null until registered.</summary>
     public string? RegisteredSessionId { get; set; }
+
+    /// <summary>
+    /// Live registry session after successful Hello registration; null until registered.
+    /// </summary>
+    /// <remarks>
+    /// Cached so protocol activity can update <see cref="ConnectorSession.LastActivityUtc"/>
+    /// without taking the registry's global lock on every frame (PERF-SRV-02). Assigned only after
+    /// successful Hello registration; cleared on connector teardown after unregister. The registry
+    /// remains the source of truth for membership.
+    /// </remarks>
+    public ConnectorSession? RegisteredSession { get; set; }
 
     /// <summary>Current connection lifecycle state.</summary>
     public ConnectorConnectionState State { get; private set; }

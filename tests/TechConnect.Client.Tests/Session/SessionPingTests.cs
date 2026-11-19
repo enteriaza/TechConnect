@@ -7,12 +7,10 @@
 //
 // -----------------------------------------------------------------------------
 
-using System.Text;
 using FluentAssertions;
 using Microsoft.Extensions.Time.Testing;
 using TechConnect.Protocol;
 using TechConnect.Protocol.Messages;
-using TechConnect.Protocol.Serialization;
 using TechConnect.Client.Configuration;
 using TechConnect.Client.Models;
 using TechConnect.Client.Services;
@@ -38,14 +36,13 @@ public sealed class SessionPingTests
         await TestHelpers.WaitUntilAsync(() => h.Transport.IsConnected);
 
         var writesBefore = h.Serial.WriteCount;
-        var payload = Encoding.UTF8.GetString(
-            ControlMessageSerializer.SerializeSessionPing(new SessionPingMessage
-            {
-                CorrelationId = "sp-1"
-            }));
 
-        // Surface as legacy session.ping via the same path the TCP transport uses.
-        var legacy = ControlProtocol.Create(ControlProtocol.TypeSessionPing, new { }, "sp-1");
+        // Mirror TcpMtlsRemoteConsoleTransport.DispatchSessionPing: legacy envelope with a
+        // source-gen-registered SessionPingMessage payload (anonymous types are not registered).
+        var legacy = ControlProtocol.Create(
+            ControlProtocol.TypeSessionPing,
+            new SessionPingMessage { CorrelationId = "sp-1" },
+            "sp-1");
         h.Transport.EmitControlMessage(ControlProtocol.Serialize(legacy));
 
         await TestHelpers.WaitUntilAsync(
@@ -55,7 +52,6 @@ public sealed class SessionPingTests
             because: "connector should reply to session.ping without using serial");
 
         h.Serial.WriteCount.Should().Be(writesBefore);
-        _ = payload;
     }
 
     /// <summary>

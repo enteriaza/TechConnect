@@ -254,7 +254,12 @@ internal sealed class OperatorAttachmentManager
     /// Enqueues device RX for the attached operator when terminal mode is active.
     /// </summary>
     /// <param name="sessionId">Connector session that produced the RX.</param>
-    /// <param name="data">Device payload bytes; empty data counts as enqueued when attached.</param>
+    /// <param name="data">
+    /// Caller-owned device payload (typically a <c>FrameReader</c> SerialData array).
+    /// On <see cref="DeviceRxEnqueueResult.Enqueued"/> the outbound queue takes ownership and
+    /// the caller must not mutate or reuse the array. On any other result the caller retains
+    /// ownership (and may discard).
+    /// </param>
     /// <returns>
     /// <see cref="DeviceRxEnqueueResult.Enqueued"/> on success;
     /// <see cref="DeviceRxEnqueueResult.NoAttachment"/> when none;
@@ -264,10 +269,14 @@ internal sealed class OperatorAttachmentManager
     /// </returns>
     /// <remarks>
     /// Overflow → caller should detach. No attachment / CLI-only attachment → discard quietly.
-    /// Does not terminate the connector connection.
+    /// Does not terminate the connector connection. Uses ownership transfer into
+    /// <see cref="BoundedByteQueue"/> to avoid a second payload copy (PERF-SRV-01).
     /// </remarks>
-    public DeviceRxEnqueueResult TryEnqueueDeviceRx(string sessionId, ReadOnlyMemory<byte> data)
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> is <see langword="null"/>.</exception>
+    public DeviceRxEnqueueResult TryEnqueueDeviceRx(string sessionId, byte[] data)
     {
+        ArgumentNullException.ThrowIfNull(data);
+
         OperatorAttachment? attachment;
         lock (_gate)
         {
@@ -277,7 +286,7 @@ internal sealed class OperatorAttachmentManager
             }
         }
 
-        if (data.IsEmpty)
+        if (data.Length == 0)
         {
             return DeviceRxEnqueueResult.Enqueued;
         }
@@ -289,7 +298,7 @@ internal sealed class OperatorAttachmentManager
         }
 
         attachment.AddBytesFromDevice(data.Length);
-        if (attachment.ToOperator.TryEnqueue(data))
+        if (attachment.ToOperator.TryEnqueueOwned(data))
         {
             return DeviceRxEnqueueResult.Enqueued;
         }

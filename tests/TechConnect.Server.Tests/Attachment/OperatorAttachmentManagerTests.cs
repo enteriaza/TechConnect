@@ -197,9 +197,32 @@ public sealed class OperatorAttachmentManagerTests
         attach.Succeeded.Should().BeTrue();
         attach.Attachment!.IsTerminalActive = true;
 
-        var chunk = new byte[3000];
-        manager.TryEnqueueDeviceRx(sessionId, chunk).Should().Be(DeviceRxEnqueueResult.Enqueued);
-        manager.TryEnqueueDeviceRx(sessionId, chunk).Should().Be(DeviceRxEnqueueResult.Overflow);
+        var first = new byte[3000];
+        var second = new byte[3000];
+        manager.TryEnqueueDeviceRx(sessionId, first).Should().Be(DeviceRxEnqueueResult.Enqueued);
+        manager.TryEnqueueDeviceRx(sessionId, second).Should().Be(DeviceRxEnqueueResult.Overflow);
+
+        // Ownership transferred on enqueue: dequeued instance is the first array.
+        var got = await attach.Attachment.ToOperator.DequeueAsync(CancellationToken.None);
+        ReferenceEquals(got, first).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// Verifies suppressed (CLI-mode) enqueue retains caller ownership and does not queue bytes.
+    /// </summary>
+    [Fact]
+    public void EnqueueDeviceRx_Suppressed_RetainsCallerOwnership()
+    {
+        var (manager, _, sessionId) = Seed();
+        var attach = manager.TryAttach("op-1", sessionId, "conn-1", operatorOutboundBytes: 4096);
+        attach.Succeeded.Should().BeTrue();
+        attach.Attachment!.IsTerminalActive = false;
+
+        var payload = new byte[] { 1, 2, 3 };
+        manager.TryEnqueueDeviceRx(sessionId, payload).Should().Be(DeviceRxEnqueueResult.Suppressed);
+        attach.Attachment.ToOperator.QueuedBytes.Should().Be(0);
+        payload[0] = 9; // still caller-owned
+        payload[0].Should().Be(9);
     }
 
     /// <summary>

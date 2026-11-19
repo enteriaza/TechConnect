@@ -239,11 +239,14 @@ internal sealed class RemoteSessionService : IRemoteSessionService
             }
 
             // Fail fast for expected empty/placeholder endpoint — no connect attempt / retry storm.
+            // Leave remote ingress disabled so local serial RX cannot grow the unbounded Incoming channel.
             if (!RemoteEndpoint.IsConfigured(_options.Value))
             {
                 _boundPortName = portName;
                 _nocState = NocAttachmentState.Waiting;
                 _lastOperatorStatusVersion = 0;
+                _serialConnection.SetRemoteIngressEnabled(false);
+                _ = _serialConnection.DrainPendingRemoteIngress();
                 SetState(
                     RemoteSessionState.Error,
                     error: "Remote service is not configured. Local console remains available.");
@@ -277,6 +280,8 @@ internal sealed class RemoteSessionService : IRemoteSessionService
                 _options.Value.Host,
                 _options.Value.Port);
 
+            // Arm Incoming publication only for the lifetime of the bridge consumer (PERF-CLI-03).
+            _serialConnection.SetRemoteIngressEnabled(true);
             _rxBridgeTask = Task.Run(() => BridgeSerialRxAsync(sessionToken), CancellationToken.None);
             _txDrainTask = Task.Run(() => DrainOutboundAsync(sessionToken), CancellationToken.None);
             _reconnectTask = Task.Run(
@@ -357,6 +362,10 @@ internal sealed class RemoteSessionService : IRemoteSessionService
 
         SetState(RemoteSessionState.Disconnecting, error: null);
 
+        // Stop enqueueing into Incoming before cancelling the bridge so serial RX cannot race
+        // unbounded growth while workers wind down (PERF-CLI-03). Local DataTransferred continues.
+        _serialConnection.SetRemoteIngressEnabled(false);
+
         try
         {
             await _sessionCts.CancelAsync().ConfigureAwait(false);
@@ -385,6 +394,9 @@ internal sealed class RemoteSessionService : IRemoteSessionService
             .ConfigureAwait(false);
         await WaitForBackgroundAsync(_txDrainTask, BackgroundJoinTimeout, "tx_drain", opId)
             .ConfigureAwait(false);
+
+        // Bridge has stopped — drop any leftover Incoming items so they cannot retain memory.
+        _ = _serialConnection.DrainPendingRemoteIngress();
 
         DetachTransportHooks();
 
@@ -477,6 +489,9 @@ internal sealed class RemoteSessionService : IRemoteSessionService
             return;
         }
 
+        // Disable ingress before cancelling workers so post-error serial RX cannot fill Incoming.
+        _serialConnection.SetRemoteIngressEnabled(false);
+
         try
         {
             await cts.CancelAsync().ConfigureAwait(false);
@@ -501,6 +516,8 @@ internal sealed class RemoteSessionService : IRemoteSessionService
             .ConfigureAwait(false);
         await WaitForBackgroundAsync(_txDrainTask, BackgroundJoinTimeout, "tx_drain", opId)
             .ConfigureAwait(false);
+
+        _ = _serialConnection.DrainPendingRemoteIngress();
 
         DetachTransportHooks();
 

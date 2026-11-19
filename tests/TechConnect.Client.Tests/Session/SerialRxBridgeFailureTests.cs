@@ -153,9 +153,25 @@ public sealed class SerialRxBridgeFailureTests
             e.Level == LogLevel.Error &&
             e.Message.Contains("Serial→remote RX bridge failed", StringComparison.Ordinal));
 
-        // Producer cannot keep writing into a fault-completed channel (bounded outcome).
-        var act = () => h.Serial.InjectRx("after-fault"u8.ToArray());
-        act.Should().Throw<InvalidOperationException>();
+        await TestHelpers.WaitUntilAsync(
+            () => !h.Serial.IsRemoteIngressEnabled,
+            TimeSpan.FromSeconds(5),
+            "error finalization must disable remote ingress");
+
+        // After finalize, local RX continues without writing into Incoming (PERF-CLI-03).
+        var uiBytes = 0;
+        h.Serial.DataTransferred += (_, chunk) =>
+        {
+            if (chunk.Direction == SerialDataDirection.Rx)
+            {
+                Interlocked.Add(ref uiBytes, chunk.Data.Length);
+            }
+        };
+
+        h.Serial.InjectRx("after-fault"u8.ToArray());
+        await TestHelpers.WaitUntilAsync(() => Volatile.Read(ref uiBytes) >= "after-fault"u8.Length);
+        h.Serial.GetReceiveDiagnostics().PendingIncomingItems.Should().Be(0);
+        h.Serial.Incoming.TryRead(out _).Should().BeFalse();
     }
 
     /// <summary>

@@ -115,6 +115,50 @@ public sealed class FrameReaderWriterTests
     }
 
     /// <summary>
+    /// Verifies each successful read transfers a distinct payload array that remains valid after
+    /// subsequent reads (caller ownership; no aliasing with the next frame).
+    /// </summary>
+    [Fact]
+    public async Task Read_PayloadOwnership_DistinctArraysAcrossReads()
+    {
+        await using var stream = new SegmentedMemoryStream();
+        await using var writer = new FrameWriter(stream);
+        await writer.WriteAsync(MessageType.SerialData, new byte[] { 10, 11 });
+        await writer.WriteAsync(MessageType.SerialData, new byte[] { 20, 21, 22 });
+
+        var reader = new FrameReader(stream);
+        var first = await reader.ReadAsync();
+        var second = await reader.ReadAsync();
+        first.Should().NotBeNull();
+        second.Should().NotBeNull();
+        ReferenceEquals(first!.Value.Payload, second!.Value.Payload).Should().BeFalse();
+        first.Value.Payload.Should().Equal(10, 11);
+        second.Value.Payload.Should().Equal(20, 21, 22);
+    }
+
+    /// <summary>
+    /// Verifies a maximum-size SerialData payload round-trips under default limits.
+    /// </summary>
+    [Fact]
+    public async Task Read_MaxSerialDataPayload_RoundTrips()
+    {
+        var max = ProtocolLimits.Default.GetMaxPayloadBytes(MessageType.SerialData);
+        var payload = new byte[max];
+        payload[0] = 0xA5;
+        payload[^1] = 0x5A;
+
+        await using var stream = new SegmentedMemoryStream(readChunkSize: 4096);
+        await using var writer = new FrameWriter(stream);
+        await writer.WriteAsync(MessageType.SerialData, payload);
+
+        var frame = await new FrameReader(stream).ReadAsync();
+        frame.Should().NotBeNull();
+        frame!.Value.Payload.Should().HaveCount(max);
+        frame.Value.Payload[0].Should().Be(0xA5);
+        frame.Value.Payload[^1].Should().Be(0x5A);
+    }
+
+    /// <summary>
     /// Verifies that OperatorStatus frames round-trip through fragmented framing with intact JSON payloads.
     /// </summary>
     [Fact]

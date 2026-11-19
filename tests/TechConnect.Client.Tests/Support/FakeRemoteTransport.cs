@@ -116,6 +116,11 @@ internal sealed class FakeRemoteTransport : IRemoteConsoleTransport
     public void SetSendException(Exception? exception) => _sendException = exception;
 
     /// <summary>
+    /// Optional delay applied inside <see cref="SendSerialDataAsync"/> to simulate a slow remote.
+    /// </summary>
+    public TimeSpan? SendDelay { get; set; }
+
+    /// <summary>
     /// Causes the next <see cref="ConnectAsync"/> to wait until <see cref="ReleaseHeldConnect"/>.
     /// </summary>
     public void HoldNextConnect() => _holdConnect = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -228,6 +233,11 @@ internal sealed class FakeRemoteTransport : IRemoteConsoleTransport
             throw _sendException;
         }
 
+        if (SendDelay is { } delay)
+        {
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        }
+
         var copy = data.ToArray();
         SentPayloads.Enqueue(copy);
         await _sendChannel.Writer.WriteAsync(copy, cancellationToken).ConfigureAwait(false);
@@ -325,6 +335,26 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
     private long _bytesTransmitted;
 
     /// <summary>
+    /// Bytes accepted from InjectRx/Open RX but not written to Incoming while ingress was disabled.
+    /// </summary>
+    private long _bytesSkippedRemoteIngress;
+
+    /// <summary>
+    /// Bytes successfully written onto Incoming.
+    /// </summary>
+    private long _bytesPublishedToIncoming;
+
+    /// <summary>
+    /// When non-zero, InjectRx publishes onto Incoming for remote bridging.
+    /// </summary>
+    private int _remoteIngressEnabled;
+
+    /// <summary>
+    /// In-flight InjectRx publishers between enablement check and TryWrite completion.
+    /// </summary>
+    private int _ingressPublishInFlight;
+
+    /// <summary>
     /// Whether DisposeAsync completed for the fake serial service.
     /// </summary>
     private bool _disposed;
@@ -376,6 +406,43 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
 
     /// <inheritdoc />
     public System.Threading.Channels.ChannelReader<SerialDataChunk> Incoming => _incoming.Reader;
+
+    /// <inheritdoc />
+    public bool IsRemoteIngressEnabled => Volatile.Read(ref _remoteIngressEnabled) != 0;
+
+    /// <inheritdoc />
+    public void SetRemoteIngressEnabled(bool enabled)
+    {
+        if (enabled)
+        {
+            Volatile.Write(ref _remoteIngressEnabled, 1);
+            return;
+        }
+
+        Volatile.Write(ref _remoteIngressEnabled, 0);
+        var spinner = new SpinWait();
+        while (Volatile.Read(ref _ingressPublishInFlight) != 0)
+        {
+            spinner.SpinOnce();
+        }
+    }
+
+    /// <inheritdoc />
+    public int DrainPendingRemoteIngress()
+    {
+        var drainedBytes = 0;
+        while (_incoming.Reader.TryRead(out var chunk))
+        {
+            drainedBytes += chunk.Data.Length;
+        }
+
+        if (drainedBytes > 0)
+        {
+            Interlocked.Add(ref _bytesSkippedRemoteIngress, drainedBytes);
+        }
+
+        return drainedBytes;
+    }
 
     /// <summary>
     /// Snapshot of payloads accepted by <see cref="WriteAsync"/>.
@@ -485,7 +552,10 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
             ReadCallCount = stats.BytesReceived > 0 ? 1 : 0,
             ZeroReadCount = 0,
             BytesReceivedFromPort = stats.BytesReceived,
-            BytesPublishedToIncomingChannel = stats.BytesReceived,
+            BytesPublishedToIncomingChannel = Interlocked.Read(ref _bytesPublishedToIncoming),
+            BytesSkippedRemoteIngressDisabled = Interlocked.Read(ref _bytesSkippedRemoteIngress),
+            IsRemoteIngressEnabled = IsRemoteIngressEnabled,
+            PendingIncomingItems = _incoming.Reader.CanCount ? _incoming.Reader.Count : -1,
             BytesDeliveredToDataTransferred = stats.BytesReceived,
             LastRxUtc = stats.LastRxUtc,
             LastReadError = null,
@@ -516,6 +586,9 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
             _isOpen = true;
             _portName = portName;
             _configuration = initialConfiguration ?? SerialPortConfiguration.CreateDefault();
+            Volatile.Write(ref _remoteIngressEnabled, 0);
+            Interlocked.Exchange(ref _bytesSkippedRemoteIngress, 0);
+            Interlocked.Exchange(ref _bytesPublishedToIncoming, 0);
         }
     }
 
@@ -675,7 +748,8 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
     }
 
     /// <summary>
-    /// Publishes an RX chunk to the incoming channel and raises <see cref="DataTransferred"/>.
+    /// Publishes an RX chunk (optionally onto Incoming when remote ingress is enabled) and raises
+    /// <see cref="DataTransferred"/>.
     /// </summary>
     public void InjectRx(byte[] data)
     {
@@ -691,9 +765,33 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
             _bytesReceived += data.Length;
         }
 
-        if (!_incoming.Writer.TryWrite(chunk))
+        if (Volatile.Read(ref _remoteIngressEnabled) == 0)
         {
-            throw new InvalidOperationException("Incoming channel completed.");
+            Interlocked.Add(ref _bytesSkippedRemoteIngress, data.Length);
+        }
+        else
+        {
+            Interlocked.Increment(ref _ingressPublishInFlight);
+            try
+            {
+                if (Volatile.Read(ref _remoteIngressEnabled) == 0)
+                {
+                    Interlocked.Add(ref _bytesSkippedRemoteIngress, data.Length);
+                }
+                else if (!_incoming.Writer.TryWrite(chunk))
+                {
+                    Interlocked.Add(ref _bytesSkippedRemoteIngress, data.Length);
+                    throw new InvalidOperationException("Incoming channel completed.");
+                }
+                else
+                {
+                    Interlocked.Add(ref _bytesPublishedToIncoming, data.Length);
+                }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _ingressPublishInFlight);
+            }
         }
 
         DataTransferred?.Invoke(this, chunk);

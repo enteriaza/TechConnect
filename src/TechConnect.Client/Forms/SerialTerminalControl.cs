@@ -8,7 +8,9 @@
 //
 // -----------------------------------------------------------------------------
 
+using System.ComponentModel;
 using System.Drawing.Text;
+using System.Text;
 using XTerm.Buffer;
 using XTerm.Common;
 
@@ -20,14 +22,87 @@ namespace TechConnect.Client.Forms;
 /// <remarks>
 /// Does not send keyboard input to the serial port. Scrollback is available via
 /// the mouse wheel. Terminal grid size tracks the client area and font metrics.
+/// Paint path reuses a <see cref="StringBuilder"/> for attribute runs and caches
+/// brushes/pens by ARGB to limit Gen0 pressure under sustained serial output (PERF-UI-01).
+/// Dirty-row invalidation uses XTerm.NET <c>BufferLine.Version</c> (no library fork) so
+/// unchanged rows are not repainted after small updates (PERF-UI-01 CPU / repaint).
 /// </remarks>
 internal sealed class SerialTerminalControl : Control
 {
     /// <summary>Default Consolas face used for serial console rendering.</summary>
     private static readonly Font DefaultTerminalFont = new("Consolas", 10f, FontStyle.Regular, GraphicsUnit.Point);
 
+    /// <summary>
+    /// When at least this fraction of rows is dirty, invalidate the full viewport
+    /// (avoids many small Invalidate rects under full-screen redraws).
+    /// </summary>
+    private const double FullInvalidateDirtyFraction = 0.5;
+
     /// <summary>Headless VT session whose buffer is painted by this control.</summary>
     private readonly VtTerminalHost _host;
+
+    /// <summary>Reusable builder for attribute-run text within a paint pass.</summary>
+    private readonly StringBuilder _runBuilder = new(128);
+
+    /// <summary>Cached solid brushes keyed by ARGB (disposed with the control).</summary>
+    private readonly Dictionary<int, SolidBrush> _brushCache = new();
+
+    /// <summary>Cached pens keyed by ARGB for underline strokes.</summary>
+    private readonly Dictionary<int, Pen> _penCache = new();
+
+    /// <summary>
+    /// Soft cap on cached brushes/pens. Truecolor (RGB) attributes can invent many distinct
+    /// ARGB values; flushing the cache at this limit prevents unbounded GDI handle growth.
+    /// </summary>
+    private const int MaxCachedGdiObjects = 384;
+
+    /// <summary>
+    /// <c>BufferLine.Version</c> values from the last completed paint, indexed by viewport row.
+    /// </summary>
+    private long[]? _paintedLineVersions;
+
+    /// <summary>Buffer <c>YDisp</c> captured at last paint.</summary>
+    private int _paintedYDisp = int.MinValue;
+
+    /// <summary>Column count captured at last paint.</summary>
+    private int _paintedCols;
+
+    /// <summary>Row count captured at last paint.</summary>
+    private int _paintedRows;
+
+    /// <summary>Viewport cursor row painted last (-1 when cursor was not drawn).</summary>
+    private int _paintedCursorRow = -1;
+
+    /// <summary>Viewport cursor column painted last.</summary>
+    private int _paintedCursorCol = -1;
+
+    /// <summary>Whether the cursor was drawn on the last paint.</summary>
+    private bool _paintedCursorVisible;
+
+    /// <summary>Reusable scratch flags for dirty-row classification (UI thread only).</summary>
+    private bool[]? _dirtyRowsScratch;
+
+    /// <summary>
+    /// Rows that must be painted on the next <see cref="OnPaint"/>. Double-buffering often
+    /// expands <see cref="PaintEventArgs.ClipRectangle"/> to the full client, so clip alone
+    /// cannot limit work — this mask is the source of truth for partial repaints.
+    /// </summary>
+    private bool[]? _pendingPaintRows;
+
+    /// <summary>
+    /// Scratch copy of the pending mask for the in-flight paint plan (UI thread only).
+    /// </summary>
+    private bool[]? _paintPlanScratch;
+
+    /// <summary>
+    /// Per-row <c>BufferLine.Version</c> observed immediately before <see cref="PaintLine"/>
+    /// for the in-flight paint (UI thread only). Fingerprints use these values so a nested
+    /// update cannot advance the painted version past the contents that were rendered.
+    /// </summary>
+    private long[]? _paintVersionScratch;
+
+    /// <summary>When true, the next paint renders every viewport row.</summary>
+    private bool _pendingPaintFull = true;
 
     /// <summary>Cached cell width in pixels for the current font.</summary>
     private int _cellWidth = 8;
@@ -89,7 +164,7 @@ internal sealed class SerialTerminalControl : Control
             _host.ScrollToBottom();
         }
 
-        Invalidate();
+        InvalidateDirtyRows();
     }
 
     /// <summary>
@@ -108,6 +183,7 @@ internal sealed class SerialTerminalControl : Control
         }
 
         _host.ResyncAfterDisplayOverflow();
+        ResetPaintedState();
         Write(data);
     }
 
@@ -122,7 +198,7 @@ internal sealed class SerialTerminalControl : Control
         }
 
         _host.Clear();
-        Invalidate();
+        ScheduleFullPaint();
     }
 
     /// <summary>
@@ -154,7 +230,7 @@ internal sealed class SerialTerminalControl : Control
         _boldFont?.Dispose();
         _boldFont = null;
         RecalculateMetricsAndResize();
-        Invalidate();
+        ScheduleFullPaint();
     }
 
     /// <inheritdoc />
@@ -176,7 +252,8 @@ internal sealed class SerialTerminalControl : Control
         // Positive Delta scrolls toward older scrollback (negative ScrollLines).
         var lines = e.Delta > 0 ? -3 : 3;
         _host.ScrollLines(lines);
-        Invalidate();
+        // YDisp change remaps every viewport row — full repaint.
+        ScheduleFullPaint();
     }
 
     /// <inheritdoc />
@@ -190,7 +267,6 @@ internal sealed class SerialTerminalControl : Control
         }
 
         var g = e.Graphics;
-        g.Clear(BackColor);
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
         var terminal = _host.Terminal;
@@ -208,11 +284,82 @@ internal sealed class SerialTerminalControl : Control
             defaultFg = ForeColor;
         }
 
+        var backArgb = BackColor.ToArgb();
         var rows = terminal.Rows;
         var cols = terminal.Cols;
+        if (rows == 0 || cols == 0)
+        {
+            g.Clear(BackColor);
+            LastPaintedRowCountForTests = 0;
+            _pendingPaintFull = true;
+            return;
+        }
 
+        // Snapshot the paint plan, then clear pending immediately so a nested Write
+        // (message pump during TextRenderer/GDI) can re-dirty rows without being lost when
+        // this paint finishes (PERF-UI-01 dirty-row lifecycle).
+        var paintFull = _pendingPaintFull ||
+                        _pendingPaintRows is null ||
+                        _pendingPaintRows.Length < rows;
+        bool[]? paintPlan = null;
+        if (!paintFull)
+        {
+            var anyPending = false;
+            for (var i = 0; i < rows; i++)
+            {
+                if (_pendingPaintRows![i])
+                {
+                    anyPending = true;
+                    break;
+                }
+            }
+
+            // External Invalidate/Refresh did not go through InvalidateDirtyRows.
+            if (!anyPending)
+            {
+                paintFull = true;
+            }
+            else
+            {
+                if (_paintPlanScratch is null || _paintPlanScratch.Length < rows)
+                {
+                    _paintPlanScratch = new bool[rows];
+                }
+
+                paintPlan = _paintPlanScratch;
+                Array.Copy(_pendingPaintRows!, paintPlan, rows);
+            }
+        }
+
+        _pendingPaintFull = false;
+        if (_pendingPaintRows is not null)
+        {
+            Array.Clear(_pendingPaintRows, 0, Math.Min(_pendingPaintRows.Length, rows));
+        }
+
+        // Test hook: runs after pending is cleared so nested Write can schedule a new dirty set.
+        BeforePaintRowsForTests?.Invoke();
+
+        var viewportWidth = cols * _cellWidth;
+        if (paintFull)
+        {
+            g.Clear(BackColor);
+        }
+
+        if (_paintVersionScratch is null || _paintVersionScratch.Length < rows)
+        {
+            _paintVersionScratch = new long[rows];
+        }
+
+        var paintedRows = 0;
+        var backBrush = GetBrush(BackColor);
         for (var row = 0; row < rows; row++)
         {
+            if (!paintFull && (paintPlan is null || !paintPlan[row]))
+            {
+                continue;
+            }
+
             var lineIndex = buffer.YDisp + row;
             if (lineIndex < 0 || lineIndex >= buffer.Lines.Length)
             {
@@ -225,14 +372,42 @@ internal sealed class SerialTerminalControl : Control
                 continue;
             }
 
-            PaintLine(g, line, row, cols, defaultFg, defaultBg, palette, terminal.ReverseVideo);
+            // Capture version before rendering so the fingerprint cannot advance past the
+            // contents this paint actually draws (nested Write may bump Version mid-paint).
+            var versionAtPaint = line.Version;
+            _paintVersionScratch[row] = versionAtPaint;
+
+            if (!paintFull)
+            {
+                // Partial invalidation must erase the row strip; default-bg cells do not fill.
+                g.FillRectangle(backBrush, 0, row * _cellHeight, viewportWidth, _cellHeight);
+            }
+
+            PaintLine(g, line, row, cols, defaultFg, defaultBg, palette, terminal.ReverseVideo, backArgb);
+            AfterPaintRowForTests?.Invoke(row);
+            paintedRows++;
+
+            if (line.Version != versionAtPaint)
+            {
+                // Row advanced while we rendered the older snapshot — keep it dirty.
+                EnsurePendingPaintRows(rows);
+                _pendingPaintRows![row] = true;
+                if (!_pendingPaintFull)
+                {
+                    Invalidate(new Rectangle(0, row * _cellHeight, viewportWidth, _cellHeight));
+                    LastInvalidateWasFullForTests = false;
+                }
+            }
         }
 
+        var cursorVisible = false;
+        var cursorRow = -1;
+        var cursorCol = -1;
         if (terminal.CursorVisible && _host.HasReceivedOutput && _host.IsScrolledToBottom)
         {
             // buffer.Y is relative to YBase; convert to viewport row.
-            var cursorRow = buffer.Y + buffer.YBase - buffer.YDisp;
-            var cursorCol = buffer.X;
+            cursorRow = buffer.Y + buffer.YBase - buffer.YDisp;
+            cursorCol = buffer.X;
             if (cursorRow >= 0 && cursorRow < rows && cursorCol >= 0 && cursorCol < cols)
             {
                 var cursorRect = new Rectangle(
@@ -240,10 +415,26 @@ internal sealed class SerialTerminalControl : Control
                     cursorRow * _cellHeight,
                     Math.Max(1, _cellWidth),
                     Math.Max(1, _cellHeight));
-                using var brush = new SolidBrush(ToColor(palette.Cursor));
-                g.FillRectangle(brush, cursorRect);
+                if (paintFull || (paintPlan is not null && paintPlan[cursorRow]))
+                {
+                    g.FillRectangle(GetBrush(ToColor(palette.Cursor)), cursorRect);
+                    cursorVisible = true;
+                }
             }
         }
+
+        LastPaintedRowCountForTests = paintedRows;
+        CapturePaintedState(
+            buffer,
+            rows,
+            cols,
+            cursorVisible,
+            cursorRow,
+            cursorCol,
+            paintFull,
+            paintPlan,
+            _paintVersionScratch);
+        AfterPaintPassForTests?.Invoke();
     }
 
     /// <inheritdoc />
@@ -252,8 +443,19 @@ internal sealed class SerialTerminalControl : Control
         if (disposing)
         {
             _isDisposing = true;
+            BeforePaintRowsForTests = null;
+            AfterPaintRowForTests = null;
+            AfterPaintPassForTests = null;
+            ResetPaintedState();
+            _pendingPaintFull = true;
+            if (_pendingPaintRows is not null)
+            {
+                Array.Clear(_pendingPaintRows, 0, _pendingPaintRows.Length);
+            }
+
             _boldFont?.Dispose();
             _boldFont = null;
+            DisposeGdiCaches();
             _host.Dispose();
         }
 
@@ -266,6 +468,393 @@ internal sealed class SerialTerminalControl : Control
     private Font GetBoldFont() => _boldFont ??= new Font(Font, FontStyle.Bold);
 
     /// <summary>
+    /// Returns a cached <see cref="SolidBrush"/> for <paramref name="color"/>.
+    /// </summary>
+    /// <remarks>
+    /// Must only be called from the UI paint path while the control is alive. Returns after
+    /// <see cref="_isDisposing"/> is set are prevented by the early exit in <see cref="OnPaint"/>.
+    /// </remarks>
+    private SolidBrush GetBrush(Color color)
+    {
+        var key = color.ToArgb();
+        if (_brushCache.TryGetValue(key, out var brush))
+        {
+            return brush;
+        }
+
+        if (_brushCache.Count >= MaxCachedGdiObjects)
+        {
+            DisposeBrushCacheOnly();
+        }
+
+        brush = new SolidBrush(color);
+        _brushCache[key] = brush;
+        return brush;
+    }
+
+    /// <summary>
+    /// Returns a cached <see cref="Pen"/> for <paramref name="color"/>.
+    /// </summary>
+    private Pen GetPen(Color color)
+    {
+        var key = color.ToArgb();
+        if (_penCache.TryGetValue(key, out var pen))
+        {
+            return pen;
+        }
+
+        if (_penCache.Count >= MaxCachedGdiObjects)
+        {
+            DisposePenCacheOnly();
+        }
+
+        pen = new Pen(color);
+        _penCache[key] = pen;
+        return pen;
+    }
+
+    /// <summary>
+    /// Disposes cached GDI brushes and pens.
+    /// </summary>
+    private void DisposeGdiCaches()
+    {
+        DisposeBrushCacheOnly();
+        DisposePenCacheOnly();
+    }
+
+    /// <summary>
+    /// Disposes and clears only the brush cache (used for capacity flush and full dispose).
+    /// </summary>
+    private void DisposeBrushCacheOnly()
+    {
+        foreach (var brush in _brushCache.Values)
+        {
+            brush.Dispose();
+        }
+
+        _brushCache.Clear();
+    }
+
+    /// <summary>
+    /// Disposes and clears only the pen cache (used for capacity flush and full dispose).
+    /// </summary>
+    private void DisposePenCacheOnly()
+    {
+        foreach (var pen in _penCache.Values)
+        {
+            pen.Dispose();
+        }
+
+        _penCache.Clear();
+    }
+
+    /// <summary>
+    /// Brush cache size for tests (capacity and disposal verification).
+    /// </summary>
+    internal int BrushCacheCountForTests => _brushCache.Count;
+
+    /// <summary>
+    /// Pen cache size for tests (capacity and disposal verification).
+    /// </summary>
+    internal int PenCacheCountForTests => _penCache.Count;
+
+    /// <summary>
+    /// Number of viewport rows that executed <see cref="PaintLine"/> on the last paint (tests).
+    /// </summary>
+    internal int LastPaintedRowCountForTests { get; private set; }
+
+    /// <summary>
+    /// Whether the last invalidation scheduled a full-client repaint (tests).
+    /// </summary>
+    internal bool LastInvalidateWasFullForTests { get; private set; }
+
+    /// <summary>
+    /// Optional test callback invoked at the start of row painting, after the pending dirty
+    /// mask has been snapshotted and cleared (allows deterministic nested-Write coverage).
+    /// </summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal Action? BeforePaintRowsForTests { get; set; }
+
+    /// <summary>
+    /// Optional test callback invoked after each viewport row is painted (before the
+    /// post-paint version check), for deterministic version-skew coverage.
+    /// </summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal Action<int>? AfterPaintRowForTests { get; set; }
+
+    /// <summary>
+    /// Optional test callback invoked at the end of <see cref="OnPaint"/> after fingerprints
+    /// are updated (before nested Invalidate paints run).
+    /// </summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal Action? AfterPaintPassForTests { get; set; }
+
+    /// <summary>
+    /// Copies the current pending dirty-row mask for assertions (tests).
+    /// </summary>
+    /// <param name="destination">Destination length at least the terminal row count.</param>
+    /// <returns>True when a partial pending mask is active; false when a full paint is pending.</returns>
+    internal bool TryCopyPendingPaintRowsForTests(Span<bool> destination)
+    {
+        if (_pendingPaintFull || _pendingPaintRows is null)
+        {
+            return false;
+        }
+
+        var rows = Math.Min(destination.Length, _pendingPaintRows.Length);
+        for (var i = 0; i < rows; i++)
+        {
+            destination[i] = _pendingPaintRows[i];
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Painted fingerprint version for a viewport row, or -1 when unavailable (tests).
+    /// </summary>
+    internal long GetPaintedLineVersionForTests(int row)
+    {
+        if (_paintedLineVersions is null || row < 0 || row >= _paintedLineVersions.Length)
+        {
+            return -1;
+        }
+
+        return _paintedLineVersions[row];
+    }
+
+    /// <summary>
+    /// Current buffer line version for a viewport row, or -1 when unavailable (tests).
+    /// </summary>
+    internal long GetBufferLineVersionForTests(int row)
+    {
+        if (_isDisposing || IsDisposed)
+        {
+            return -1;
+        }
+
+        var buffer = _host.Terminal.Buffer;
+        var lineIndex = buffer.YDisp + row;
+        if (lineIndex < 0 || lineIndex >= buffer.Lines.Length)
+        {
+            return -1;
+        }
+
+        return buffer.Lines[lineIndex]?.Version ?? -1;
+    }
+
+    /// <summary>
+    /// Whether a full paint is currently pending (tests).
+    /// </summary>
+    internal bool PendingPaintFullForTests => _pendingPaintFull;
+
+    /// <summary>
+    /// Invalidates only viewport rows whose <c>BufferLine.Version</c> (or cursor) changed
+    /// since the last paint. Falls back to a full invalidate on scroll/resize/large damage.
+    /// </summary>
+    private void InvalidateDirtyRows()
+    {
+        var terminal = _host.Terminal;
+        var buffer = terminal.Buffer;
+        var rows = terminal.Rows;
+        var cols = terminal.Cols;
+
+        if (rows <= 0 || cols <= 0 ||
+            _paintedLineVersions is null ||
+            _paintedYDisp != buffer.YDisp ||
+            _paintedRows != rows ||
+            _paintedCols != cols)
+        {
+            ScheduleFullPaint();
+            return;
+        }
+
+        var dirty = _dirtyRowsScratch;
+        if (dirty is null || dirty.Length < rows)
+        {
+            dirty = new bool[rows];
+            _dirtyRowsScratch = dirty;
+        }
+        else
+        {
+            Array.Clear(dirty, 0, rows);
+        }
+
+        var dirtyCount = 0;
+        for (var row = 0; row < rows; row++)
+        {
+            var lineIndex = buffer.YDisp + row;
+            long version = 0;
+            if (lineIndex >= 0 && lineIndex < buffer.Lines.Length)
+            {
+                var line = buffer.Lines[lineIndex];
+                if (line is not null)
+                {
+                    version = line.Version;
+                }
+            }
+
+            if (version != _paintedLineVersions[row])
+            {
+                dirty[row] = true;
+                dirtyCount++;
+            }
+        }
+
+        var cursorVisible = terminal.CursorVisible && _host.HasReceivedOutput && _host.IsScrolledToBottom;
+        var cursorRow = -1;
+        var cursorCol = -1;
+        if (cursorVisible)
+        {
+            cursorRow = buffer.Y + buffer.YBase - buffer.YDisp;
+            cursorCol = buffer.X;
+            if (cursorRow < 0 || cursorRow >= rows || cursorCol < 0 || cursorCol >= cols)
+            {
+                cursorVisible = false;
+                cursorRow = -1;
+                cursorCol = -1;
+            }
+        }
+
+        if (_paintedCursorVisible && _paintedCursorRow >= 0 && _paintedCursorRow < rows && !dirty[_paintedCursorRow])
+        {
+            dirty[_paintedCursorRow] = true;
+            dirtyCount++;
+        }
+
+        if (cursorVisible && cursorRow >= 0 && !dirty[cursorRow])
+        {
+            dirty[cursorRow] = true;
+            dirtyCount++;
+        }
+
+        if (dirtyCount == 0)
+        {
+            LastInvalidateWasFullForTests = false;
+            return;
+        }
+
+        if (dirtyCount >= Math.Max(1, (int)(rows * FullInvalidateDirtyFraction)))
+        {
+            ScheduleFullPaint();
+            return;
+        }
+
+        EnsurePendingPaintRows(rows);
+        for (var row = 0; row < rows; row++)
+        {
+            if (dirty[row])
+            {
+                _pendingPaintRows![row] = true;
+            }
+        }
+
+        _pendingPaintFull = false;
+        LastInvalidateWasFullForTests = false;
+        for (var row = 0; row < rows; row++)
+        {
+            if (!dirty[row])
+            {
+                continue;
+            }
+
+            Invalidate(new Rectangle(0, row * _cellHeight, cols * _cellWidth, _cellHeight));
+        }
+    }
+
+    /// <summary>
+    /// Schedules a full-viewport repaint and clears the painted fingerprint.
+    /// </summary>
+    private void ScheduleFullPaint()
+    {
+        ResetPaintedState();
+        _pendingPaintFull = true;
+        if (_pendingPaintRows is not null)
+        {
+            Array.Clear(_pendingPaintRows, 0, _pendingPaintRows.Length);
+        }
+
+        Invalidate();
+        LastInvalidateWasFullForTests = true;
+    }
+
+    /// <summary>
+    /// Ensures <see cref="_pendingPaintRows"/> can index <paramref name="rows"/> rows.
+    /// </summary>
+    private void EnsurePendingPaintRows(int rows)
+    {
+        if (_pendingPaintRows is null || _pendingPaintRows.Length < rows)
+        {
+            _pendingPaintRows = new bool[rows];
+        }
+    }
+
+    /// <summary>
+    /// Stores viewport line versions and cursor location for rows that this paint rendered.
+    /// Fingerprints use <paramref name="versionsAtPaint"/> (captured before <see cref="PaintLine"/>),
+    /// never a newer live buffer version, so nested updates cannot mark unrendered contents painted.
+    /// </summary>
+    private void CapturePaintedState(
+        XTerm.Buffer.TerminalBuffer buffer,
+        int rows,
+        int cols,
+        bool cursorVisible,
+        int cursorRow,
+        int cursorCol,
+        bool paintFull,
+        bool[]? paintPlan,
+        long[] versionsAtPaint)
+    {
+        if (_paintedLineVersions is null || _paintedLineVersions.Length < rows)
+        {
+            var next = new long[rows];
+            if (_paintedLineVersions is not null)
+            {
+                Array.Copy(
+                    _paintedLineVersions,
+                    next,
+                    Math.Min(_paintedLineVersions.Length, rows));
+            }
+
+            _paintedLineVersions = next;
+        }
+
+        for (var row = 0; row < rows; row++)
+        {
+            if (!paintFull && (paintPlan is null || !paintPlan[row]))
+            {
+                continue;
+            }
+
+            _paintedLineVersions[row] = versionsAtPaint[row];
+        }
+
+        _paintedYDisp = buffer.YDisp;
+        _paintedRows = rows;
+        _paintedCols = cols;
+        _paintedCursorVisible = cursorVisible;
+        _paintedCursorRow = cursorVisible ? cursorRow : -1;
+        _paintedCursorCol = cursorVisible ? cursorCol : -1;
+    }
+
+    /// <summary>
+    /// Drops the last-paint fingerprint so the next update performs a full invalidate.
+    /// </summary>
+    private void ResetPaintedState()
+    {
+        _paintedLineVersions = null;
+        _paintedYDisp = int.MinValue;
+        _paintedRows = 0;
+        _paintedCols = 0;
+        _paintedCursorVisible = false;
+        _paintedCursorRow = -1;
+        _paintedCursorCol = -1;
+    }
+
+    /// <summary>
     /// Paints one terminal row as attribute runs.
     /// </summary>
     private void PaintLine(
@@ -276,35 +865,37 @@ internal sealed class SerialTerminalControl : Control
         Color defaultFg,
         Color defaultBg,
         ColorPalette palette,
-        bool reverseVideo)
+        bool reverseVideo,
+        int backArgb)
     {
         var y = row * _cellHeight;
         var runStart = 0;
-        string? runText = null;
+        var hasRun = false;
         Color runFg = defaultFg;
         Color runBg = defaultBg;
         var runBold = false;
         var runUnderline = false;
+        _runBuilder.Clear();
 
         void FlushRun(int endCol)
         {
-            if (runText is null || runText.Length == 0)
+            if (!hasRun || _runBuilder.Length == 0)
             {
                 return;
             }
 
             var x = runStart * _cellWidth;
             var width = Math.Max(_cellWidth, (endCol - runStart) * _cellWidth);
-            if (runBg.ToArgb() != BackColor.ToArgb())
+            if (runBg.ToArgb() != backArgb)
             {
-                using var bgBrush = new SolidBrush(runBg);
-                g.FillRectangle(bgBrush, x, y, width, _cellHeight);
+                g.FillRectangle(GetBrush(runBg), x, y, width, _cellHeight);
             }
 
             var font = runBold ? GetBoldFont() : Font;
+            // TextRenderer requires a string; one allocation per attribute run (not per cell).
             TextRenderer.DrawText(
                 g,
-                runText,
+                _runBuilder.ToString(),
                 font,
                 new Rectangle(x, y, width + _cellWidth, _cellHeight),
                 runFg,
@@ -312,10 +903,12 @@ internal sealed class SerialTerminalControl : Control
 
             if (runUnderline)
             {
-                using var pen = new Pen(runFg);
                 var underlineY = y + _cellHeight - 2;
-                g.DrawLine(pen, x, underlineY, x + (runText.Length * _cellWidth), underlineY);
+                g.DrawLine(GetPen(runFg), x, underlineY, x + (_runBuilder.Length * _cellWidth), underlineY);
             }
+
+            _runBuilder.Clear();
+            hasRun = false;
         }
 
         for (var col = 0; col < cols; col++)
@@ -327,38 +920,55 @@ internal sealed class SerialTerminalControl : Control
                 continue;
             }
 
-            var ch = string.IsNullOrEmpty(cell.Content) ? " " : cell.Content;
             ResolveColors(cell.Attributes, palette, defaultFg, defaultBg, reverseVideo, out var fg, out var bg);
             var bold = cell.Attributes.IsBold();
             var underline = cell.Attributes.IsUnderline();
+            var content = cell.Content;
+            var isSingleChar = string.IsNullOrEmpty(content) || content.Length == 1;
 
-            if (runText is null)
+            if (!hasRun)
             {
                 runStart = col;
-                runText = ch;
+                AppendCell(_runBuilder, content);
                 runFg = fg;
                 runBg = bg;
                 runBold = bold;
                 runUnderline = underline;
+                hasRun = true;
                 continue;
             }
 
-            if (fg == runFg && bg == runBg && bold == runBold && underline == runUnderline && ch.Length == 1)
+            if (fg == runFg && bg == runBg && bold == runBold && underline == runUnderline && isSingleChar)
             {
-                runText += ch;
+                AppendCell(_runBuilder, content);
                 continue;
             }
 
             FlushRun(col);
             runStart = col;
-            runText = ch;
+            AppendCell(_runBuilder, content);
             runFg = fg;
             runBg = bg;
             runBold = bold;
             runUnderline = underline;
+            hasRun = true;
         }
 
         FlushRun(cols);
+    }
+
+    /// <summary>
+    /// Appends a cell's display content to <paramref name="builder"/> without allocating a space string.
+    /// </summary>
+    private static void AppendCell(StringBuilder builder, string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+        {
+            builder.Append(' ');
+            return;
+        }
+
+        builder.Append(content);
     }
 
     /// <summary>
@@ -454,10 +1064,17 @@ internal sealed class SerialTerminalControl : Control
 
         var cols = Math.Max(VtTerminalHost.MinColumns, ClientSize.Width / _cellWidth);
         var rows = Math.Max(VtTerminalHost.MinRows, ClientSize.Height / _cellHeight);
+        var sizeChanged = cols != _host.Cols || rows != _host.Rows;
         _host.Resize(cols, rows);
 
         // Keep XTerm cell pixel hints in sync for any graphics sequences.
         _host.Terminal.Options.CellWidthPixels = _cellWidth;
         _host.Terminal.Options.CellHeightPixels = _cellHeight;
+
+        if (sizeChanged)
+        {
+            // Drop stale fingerprints for the previous grid; ResizeRedraw / Invalidate follows.
+            ScheduleFullPaint();
+        }
     }
 }

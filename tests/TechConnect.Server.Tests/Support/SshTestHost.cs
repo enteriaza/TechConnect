@@ -100,6 +100,11 @@ internal sealed class SshTestHost : IAsyncDisposable
     /// <summary>
     /// Starts a TechConnect host with SSH enabled on a free loopback port and temp content root.
     /// </summary>
+    /// <remarks>
+    /// Retries on ephemeral-port races: <see cref="GetFreeTcpPort"/> releases before the SSH
+    /// listener binds, so under suite load another process can claim the port and the hosted
+    /// service stops. Fresh content root + port per attempt.
+    /// </remarks>
     public static async Task<SshTestHost> StartAsync(
         IKeyPair? hostKey,
         IKeyPair[] authorizedOperatorKeys,
@@ -113,101 +118,158 @@ internal sealed class SshTestHost : IAsyncDisposable
         string privilegeLevel = "15",
         CancellationToken cancellationToken = default)
     {
-        var contentRoot = Path.Combine(Path.GetTempPath(), "TechConnect.Server.Tests", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(contentRoot);
-
-        var port = GetFreeTcpPort();
-        var authorizedLines = authorizedOperatorKeys
-            .Select((k, i) => SshTestKeys.ExportPublicKeyLine(k, $"{username}-{i}"))
-            .ToArray();
-
-        var enablePassword = passwordAuthenticationEnabled
-            ?? !string.IsNullOrWhiteSpace(passwordHash);
-        var enablePublicKey = publicKeyAuthenticationEnabled
-            ?? authorizedLines.Length > 0;
-
-        if (writeAppsettingsFile)
+        Exception? lastFailure = null;
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            var persistProduction = AppsettingsHostKeyStore.IsProductionEnvironment(environmentName);
-            WriteAppsettings(
-                Path.Combine(contentRoot, "appsettings.json"),
-                hostPrivateKey: persistProduction
-                    ? (hostKey is null ? string.Empty : SshTestKeys.ExportPrivateKeyPem(hostKey))
-                    : string.Empty,
-                includeHostPrivateKeyProperty: persistProduction || hostKey is null,
-                authorizedPublicKeys: authorizedLines,
-                listenPort: port,
-                username: username,
-                passwordHash: passwordHash,
-                privilegeLevel: privilegeLevel,
-                passwordAuthenticationEnabled: enablePassword,
-                publicKeyAuthenticationEnabled: enablePublicKey);
-
-            if (!persistProduction)
+            cancellationToken.ThrowIfCancellationRequested();
+            string? contentRoot = null;
+            IHost? host = null;
+            try
             {
-                WriteAppsettings(
-                    Path.Combine(contentRoot, $"appsettings.{environmentName}.json"),
-                    hostPrivateKey: hostKey is null ? string.Empty : SshTestKeys.ExportPrivateKeyPem(hostKey),
-                    includeHostPrivateKeyProperty: true,
-                    authorizedPublicKeys: authorizedLines,
-                    listenPort: port,
-                    username: username,
-                    passwordHash: passwordHash,
-                    privilegeLevel: privilegeLevel,
-                    passwordAuthenticationEnabled: enablePassword,
-                    publicKeyAuthenticationEnabled: enablePublicKey);
+                contentRoot = Path.Combine(
+                    Path.GetTempPath(),
+                    "TechConnect.Server.Tests",
+                    Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(contentRoot);
+
+                var port = GetFreeTcpPort();
+                var authorizedLines = authorizedOperatorKeys
+                    .Select((k, i) => SshTestKeys.ExportPublicKeyLine(k, $"{username}-{i}"))
+                    .ToArray();
+
+                var enablePassword = passwordAuthenticationEnabled
+                    ?? !string.IsNullOrWhiteSpace(passwordHash);
+                var enablePublicKey = publicKeyAuthenticationEnabled
+                    ?? authorizedLines.Length > 0;
+
+                if (writeAppsettingsFile)
+                {
+                    var persistProduction = AppsettingsHostKeyStore.IsProductionEnvironment(environmentName);
+                    WriteAppsettings(
+                        Path.Combine(contentRoot, "appsettings.json"),
+                        hostPrivateKey: persistProduction
+                            ? (hostKey is null ? string.Empty : SshTestKeys.ExportPrivateKeyPem(hostKey))
+                            : string.Empty,
+                        includeHostPrivateKeyProperty: persistProduction || hostKey is null,
+                        authorizedPublicKeys: authorizedLines,
+                        listenPort: port,
+                        username: username,
+                        passwordHash: passwordHash,
+                        privilegeLevel: privilegeLevel,
+                        passwordAuthenticationEnabled: enablePassword,
+                        publicKeyAuthenticationEnabled: enablePublicKey);
+
+                    if (!persistProduction)
+                    {
+                        WriteAppsettings(
+                            Path.Combine(contentRoot, $"appsettings.{environmentName}.json"),
+                            hostPrivateKey: hostKey is null
+                                ? string.Empty
+                                : SshTestKeys.ExportPrivateKeyPem(hostKey),
+                            includeHostPrivateKeyProperty: true,
+                            authorizedPublicKeys: authorizedLines,
+                            listenPort: port,
+                            username: username,
+                            passwordHash: passwordHash,
+                            privilegeLevel: privilegeLevel,
+                            passwordAuthenticationEnabled: enablePassword,
+                            publicKeyAuthenticationEnabled: enablePublicKey);
+                    }
+                }
+
+                var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+                {
+                    ContentRootPath = contentRoot,
+                    EnvironmentName = environmentName,
+                    Args = []
+                });
+
+                var memory = new Dictionary<string, string?>
+                {
+                    ["TechConnectServer:Ssh:Enabled"] = "true",
+                    ["TechConnectServer:Ssh:ListenAddress"] = "127.0.0.1",
+                    ["TechConnectServer:Ssh:Port"] = port.ToString(),
+                    ["TechConnectServer:Ssh:MaximumConcurrentConnections"] =
+                        maximumConcurrentConnections.ToString(),
+                    ["TechConnectServer:Ssh:ShutdownTimeoutSeconds"] = "5",
+                    ["TechConnectServer:Authentication:Local:PasswordAuthenticationEnabled"] =
+                        enablePassword ? "true" : "false",
+                    ["TechConnectServer:Authentication:Local:PublicKeyAuthenticationEnabled"] =
+                        enablePublicKey ? "true" : "false",
+                    ["Logging:File:Directory"] = Path.Combine(contentRoot, "logs"),
+                    ["Logging:File:FileNamePrefix"] = "test",
+                    ["Serilog:MinimumLevel:Default"] = "Warning"
+                };
+
+                if (!writeAppsettingsFile)
+                {
+                    memory["TechConnectServer:Ssh:HostPrivateKey"] =
+                        hostKey is null ? string.Empty : SshTestKeys.ExportPrivateKeyPem(hostKey);
+                    memory["TechConnectServer:Authentication:Local:LocalUsers:0:Username"] = username;
+                    memory["TechConnectServer:Authentication:Local:LocalUsers:0:Enabled"] = "true";
+                    memory["TechConnectServer:Authentication:Local:LocalUsers:0:PrivilegeLevel"] =
+                        privilegeLevel;
+                    if (!string.IsNullOrWhiteSpace(passwordHash))
+                    {
+                        memory["TechConnectServer:Authentication:Local:LocalUsers:0:PasswordHash"] =
+                            passwordHash;
+                    }
+
+                    for (var i = 0; i < authorizedLines.Length; i++)
+                    {
+                        memory[
+                                $"TechConnectServer:Authentication:Local:LocalUsers:0:AuthorizedPublicKeys:{i}"] =
+                            authorizedLines[i];
+                    }
+                }
+
+                builder.Configuration.AddInMemoryCollection(memory);
+                builder.Logging.ClearProviders();
+                builder.AddTechConnectServerHost();
+
+                host = builder.Build();
+                await host.StartAsync(cancellationToken).ConfigureAwait(false);
+                // BackgroundService.StartAsync returns before AcceptSessionsAsync binds.
+                await WaitForPortAsync(host, port, TimeSpan.FromSeconds(30), cancellationToken)
+                    .ConfigureAwait(false);
+
+                return new SshTestHost(contentRoot, port, environmentName, host);
+            }
+            catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
+            {
+                lastFailure = ex;
+                if (host is not null)
+                {
+                    try
+                    {
+                        await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup before retry.
+                    }
+
+                    host.Dispose();
+                    host = null;
+                }
+
+                if (contentRoot is not null)
+                {
+                    try
+                    {
+                        Directory.Delete(contentRoot, recursive: true);
+                    }
+                    catch
+                    {
+                        // Best-effort.
+                    }
+                }
             }
         }
 
-        var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
-        {
-            ContentRootPath = contentRoot,
-            EnvironmentName = environmentName,
-            Args = []
-        });
-
-        var memory = new Dictionary<string, string?>
-        {
-            ["TechConnectServer:Ssh:Enabled"] = "true",
-            ["TechConnectServer:Ssh:ListenAddress"] = "127.0.0.1",
-            ["TechConnectServer:Ssh:Port"] = port.ToString(),
-            ["TechConnectServer:Ssh:MaximumConcurrentConnections"] = maximumConcurrentConnections.ToString(),
-            ["TechConnectServer:Ssh:ShutdownTimeoutSeconds"] = "5",
-            ["TechConnectServer:Authentication:Local:PasswordAuthenticationEnabled"] = enablePassword ? "true" : "false",
-            ["TechConnectServer:Authentication:Local:PublicKeyAuthenticationEnabled"] = enablePublicKey ? "true" : "false",
-            ["Logging:File:Directory"] = Path.Combine(contentRoot, "logs"),
-            ["Logging:File:FileNamePrefix"] = "test",
-            ["Serilog:MinimumLevel:Default"] = "Warning"
-        };
-
-        if (!writeAppsettingsFile)
-        {
-            memory["TechConnectServer:Ssh:HostPrivateKey"] =
-                hostKey is null ? string.Empty : SshTestKeys.ExportPrivateKeyPem(hostKey);
-            memory["TechConnectServer:Authentication:Local:LocalUsers:0:Username"] = username;
-            memory["TechConnectServer:Authentication:Local:LocalUsers:0:Enabled"] = "true";
-            memory["TechConnectServer:Authentication:Local:LocalUsers:0:PrivilegeLevel"] = privilegeLevel;
-            if (!string.IsNullOrWhiteSpace(passwordHash))
-            {
-                memory["TechConnectServer:Authentication:Local:LocalUsers:0:PasswordHash"] = passwordHash;
-            }
-
-            for (var i = 0; i < authorizedLines.Length; i++)
-            {
-                memory[$"TechConnectServer:Authentication:Local:LocalUsers:0:AuthorizedPublicKeys:{i}"] =
-                    authorizedLines[i];
-            }
-        }
-
-        builder.Configuration.AddInMemoryCollection(memory);
-        builder.Logging.ClearProviders();
-        builder.AddTechConnectServerHost();
-
-        var host = builder.Build();
-        await host.StartAsync(cancellationToken).ConfigureAwait(false);
-        await WaitForPortAsync(port, TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
-
-        return new SshTestHost(contentRoot, port, environmentName, host);
+        throw new TimeoutException(
+            "SSH test host failed to begin listening after 3 attempts.",
+            lastFailure);
     }
 
     /// <summary>
@@ -593,19 +655,35 @@ internal sealed class SshTestHost : IAsyncDisposable
     }
 
     /// <summary>
-    /// Polls until the SSH listen port accepts connections or timeout elapses.
+    /// Polls until the SSH listen port accepts connections, the host stops, or timeout elapses.
     /// </summary>
-    private static async Task WaitForPortAsync(int port, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task WaitForPortAsync(
+        IHost host,
+        int port,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         var deadline = DateTime.UtcNow + timeout;
+        var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (lifetime.ApplicationStopping.IsCancellationRequested ||
+                lifetime.ApplicationStopped.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    $"SSH test host stopped before listening on port {port}.");
+            }
+
             try
             {
                 using var client = new TcpClient();
                 await client.ConnectAsync(IPAddress.Loopback, port, cancellationToken).ConfigureAwait(false);
                 return;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch
             {

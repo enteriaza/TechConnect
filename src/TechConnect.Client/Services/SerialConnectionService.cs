@@ -23,8 +23,9 @@ namespace TechConnect.Client.Services;
 /// <remarks>
 /// <para>
 /// <b>Ownership:</b> Creates ports via <see cref="ISerialPortFactory"/> and disposes them
-/// on close/teardown. The idle <see cref="Incoming"/> channel starts completed so consumers
-/// do not hang before the first open.
+/// on close/teardown. Publication onto <see cref="Incoming"/> requires remote ingress to be
+/// enabled by the remote session bridge. The idle <see cref="Incoming"/> channel starts
+/// completed so consumers do not hang before the first open.
 /// </para>
 /// <para>
 /// <b>Concurrency:</b> Lifecycle and write/reconfigure operations serialize on
@@ -39,9 +40,18 @@ namespace TechConnect.Client.Services;
 /// <item><see cref="SerialTrafficStats.BytesTransmitted"/> — bytes accepted by the write path
 /// after the driver output queue reports drained for that write; not remote-device acceptance.</item>
 /// <item><see cref="Incoming"/> — RX chunks published for remote bridging / consumers.</item>
-/// <item><see cref="DataTransferred"/> — UI/diagnostic notifications for RX and TX copies.</item>
+/// <item><see cref="DataTransferred"/> — UI/diagnostic notifications for RX and TX.</item>
 /// </list>
 /// Opening the port does not prove a console device is attached or responding.
+/// </para>
+/// <para>
+/// <b>RX ownership (PERF-CLI-01):</b> The reader reuses a fixed 4 KiB stream buffer.
+/// When remote ingress is enabled, each read copies into a dedicated <see cref="byte"/>
+/// array owned by the published <see cref="SerialDataChunk"/> (retained by
+/// <see cref="Incoming"/> / remote outbound). When remote ingress is disabled, RX
+/// <see cref="DataTransferred"/> may present a view over the reusable read buffer —
+/// handlers must copy any bytes they need before returning (the local console ring
+/// already does). Do not retain that memory across awaits or subsequent reads.
 /// </para>
 /// </remarks>
 internal sealed class SerialConnectionService : ISerialConnectionService
@@ -119,6 +129,24 @@ internal sealed class SerialConnectionService : ISerialConnectionService
     /// <summary>RX bytes successfully written to <see cref="_incoming"/>.</summary>
     private long _rxBytesPublished;
 
+    /// <summary>
+    /// RX bytes accepted from the port but not written to <see cref="_incoming"/> because
+    /// remote ingress was disabled.
+    /// </summary>
+    private long _rxBytesSkippedRemoteIngress;
+
+    /// <summary>
+    /// When non-zero, RX chunks are published onto <see cref="_incoming"/> for remote bridging.
+    /// </summary>
+    private int _remoteIngressEnabled;
+
+    /// <summary>
+    /// Number of RX publishers between the ingress enablement check and completed
+    /// <see cref="ChannelWriter{T}.TryWrite"/> (or bail-out). Disable waits for zero so
+    /// a final drain cannot race a late enqueue.
+    /// </summary>
+    private int _ingressPublishInFlight;
+
     /// <summary>RX bytes delivered via <see cref="DataTransferred"/>.</summary>
     private long _rxUiNotifications;
 
@@ -164,16 +192,65 @@ internal sealed class SerialConnectionService : ISerialConnectionService
 
     /// <inheritdoc />
     /// <remarks>
-    /// Completes on close/teardown. After open, carries RX chunks only (TX is notified via
-    /// <see cref="DataTransferred"/> but not written to this channel).
+    /// Completes on close/teardown. After open, carries RX chunks only while remote ingress
+    /// is enabled (TX is notified via <see cref="DataTransferred"/> but not written here).
     /// </remarks>
     public ChannelReader<SerialDataChunk> Incoming => _incoming.Reader;
 
+    /// <inheritdoc />
+    public bool IsRemoteIngressEnabled => Volatile.Read(ref _remoteIngressEnabled) != 0;
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Disabling clears the enable flag, then spins until in-flight publishers finish so a
+    /// subsequent <see cref="DrainPendingRemoteIngress"/> cannot miss a late <c>TryWrite</c>.
+    /// Enabling is a single volatile store. Neither path allocates; disable may briefly spin.
+    /// </remarks>
+    public void SetRemoteIngressEnabled(bool enabled)
+    {
+        if (enabled)
+        {
+            Volatile.Write(ref _remoteIngressEnabled, 1);
+            return;
+        }
+
+        Volatile.Write(ref _remoteIngressEnabled, 0);
+
+        // Wait for any publisher that observed enabled=1 to complete TryWrite or bail out.
+        var spinner = new SpinWait();
+        while (Volatile.Read(ref _ingressPublishInFlight) != 0)
+        {
+            spinner.SpinOnce();
+        }
+    }
+
+    /// <inheritdoc />
+    public int DrainPendingRemoteIngress()
+    {
+        var drainedBytes = 0;
+        while (_incoming.Reader.TryRead(out var chunk))
+        {
+            drainedBytes += chunk.Data.Length;
+        }
+
+        if (drainedBytes > 0)
+        {
+            Interlocked.Add(ref _rxBytesSkippedRemoteIngress, drainedBytes);
+            _logger.LogDebug(
+                "Drained {ByteCount} pending remote-ingress byte(s) from Incoming after consumer stop",
+                drainedBytes);
+        }
+
+        return drainedBytes;
+    }
+
     /// <summary>
-    /// Raised for each RX/TX chunk after local acceptance (defensive copy for TX).
+    /// Raised for each RX/TX chunk after local acceptance (defensive copy for TX;
+    /// RX may be ephemeral when remote ingress is disabled — see interface remarks).
     /// </summary>
     /// <remarks>
     /// Handler exceptions are logged and swallowed so the reader/write path continues.
+    /// Handlers must not block indefinitely and must not retain ephemeral RX memory.
     /// </remarks>
     public event EventHandler<SerialDataChunk>? DataTransferred;
 
@@ -232,6 +309,9 @@ internal sealed class SerialConnectionService : ISerialConnectionService
             ZeroReadCount = Interlocked.Read(ref _rxZeroReads),
             BytesReceivedFromPort = stats.BytesReceived,
             BytesPublishedToIncomingChannel = Interlocked.Read(ref _rxBytesPublished),
+            BytesSkippedRemoteIngressDisabled = Interlocked.Read(ref _rxBytesSkippedRemoteIngress),
+            IsRemoteIngressEnabled = IsRemoteIngressEnabled,
+            PendingIncomingItems = _incoming.Reader.CanCount ? _incoming.Reader.Count : -1,
             BytesDeliveredToDataTransferred = Interlocked.Read(ref _rxUiNotifications),
             LastRxUtc = stats.LastRxUtc,
             LastReadError = _lastReadError,
@@ -274,6 +354,8 @@ internal sealed class SerialConnectionService : ISerialConnectionService
 
             ResetStats();
             _configuration = configuration;
+            // New open starts with remote ingress disabled until RemoteSessionService arms a bridge.
+            Volatile.Write(ref _remoteIngressEnabled, 0);
             _incoming = Channel.CreateUnbounded<SerialDataChunk>(IncomingChannelOptions);
 
             var port = _portFactory.Create(portName);
@@ -904,6 +986,8 @@ internal sealed class SerialConnectionService : ISerialConnectionService
         }
 
         await StopReaderAsync(port, disposePort: true).ConfigureAwait(false);
+        Volatile.Write(ref _remoteIngressEnabled, 0);
+        _ = DrainPendingRemoteIngress();
         _incoming.Writer.TryComplete();
     }
 
@@ -920,6 +1004,8 @@ internal sealed class SerialConnectionService : ISerialConnectionService
 
         await StopReaderAsync(port, disposePort: true).ConfigureAwait(false);
 
+        Volatile.Write(ref _remoteIngressEnabled, 0);
+        _ = DrainPendingRemoteIngress();
         _incoming.Writer.TryComplete();
     }
 
@@ -983,14 +1069,27 @@ internal sealed class SerialConnectionService : ISerialConnectionService
                     break;
                 }
 
-                var payload = new byte[read];
-                Buffer.BlockCopy(buffer, 0, payload, 0, read);
+                // PERF-CLI-01: allocate a durable payload only when remote ingress may retain it.
+                // Local-console-only path publishes an ephemeral view over the reusable read buffer;
+                // DataTransferred handlers must copy before returning (SerialConsoleBuffer does).
+                var publishRemote = Volatile.Read(ref _remoteIngressEnabled) != 0;
+                ReadOnlyMemory<byte> payloadMemory;
+                if (publishRemote)
+                {
+                    var payload = GC.AllocateUninitializedArray<byte>(read);
+                    Buffer.BlockCopy(buffer, 0, payload, 0, read);
+                    payloadMemory = payload;
+                }
+                else
+                {
+                    payloadMemory = buffer.AsMemory(0, read);
+                }
 
                 var chunk = new SerialDataChunk
                 {
                     TimestampUtc = _timeProvider.GetUtcNow(),
                     Direction = SerialDataDirection.Rx,
-                    Data = payload
+                    Data = payloadMemory
                 };
 
                 // Stats reflect bytes received from the port, independent of UI rendering.
@@ -1000,7 +1099,14 @@ internal sealed class SerialConnectionService : ISerialConnectionService
                     _lastRxUtc = chunk.TimestampUtc;
                 }
 
-                Publish(chunk, countTowardIncomingChannel: true);
+                // Only offer Incoming when this read used durable storage. If ingress is enabled
+                // after the ephemeral decision, this chunk is local-only (next reads allocate).
+                if (!publishRemote)
+                {
+                    Interlocked.Add(ref _rxBytesSkippedRemoteIngress, read);
+                }
+
+                Publish(chunk, countTowardIncomingChannel: publishRemote);
                 MaybeLogRxProgress(port.PortName);
             }
         }
@@ -1035,24 +1141,20 @@ internal sealed class SerialConnectionService : ISerialConnectionService
     /// <summary>
     /// Optionally writes RX to <see cref="_incoming"/> and always raises <see cref="DataTransferred"/>.
     /// </summary>
-    /// <param name="chunk">Chunk to publish (owned byte array).</param>
+    /// <param name="chunk">
+    /// Chunk to publish. When <paramref name="countTowardIncomingChannel"/> is
+    /// <see langword="true"/>, <see cref="SerialDataChunk.Data"/> must be durable storage
+    /// (never an ephemeral read-buffer view).
+    /// </param>
     /// <param name="countTowardIncomingChannel">
-    /// True for RX destined for remote/consumers; false for TX UI notification only.
+    /// True only for RX that used durable storage and may enter <see cref="_incoming"/>;
+    /// false for TX UI notification and for local-only ephemeral RX.
     /// </param>
     private void Publish(SerialDataChunk chunk, bool countTowardIncomingChannel)
     {
         if (countTowardIncomingChannel)
         {
-            if (_incoming.Writer.TryWrite(chunk))
-            {
-                Interlocked.Add(ref _rxBytesPublished, chunk.Data.Length);
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Incoming serial channel rejected an RX chunk of {ByteCount} bytes (channel completed or full)",
-                    chunk.Data.Length);
-            }
+            PublishRemoteIngress(chunk);
         }
 
         try
@@ -1066,6 +1168,49 @@ internal sealed class SerialConnectionService : ISerialConnectionService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Serial DataTransferred handler failed");
+        }
+    }
+
+    /// <summary>
+    /// Publishes <paramref name="chunk"/> onto <see cref="_incoming"/> when remote ingress is enabled.
+    /// </summary>
+    /// <remarks>
+    /// Uses an in-flight counter so <see cref="SetRemoteIngressEnabled"/> can wait out publishers
+    /// that passed the first enablement check before a disable/drain completes (PERF-CLI-03).
+    /// </remarks>
+    private void PublishRemoteIngress(SerialDataChunk chunk)
+    {
+        if (Volatile.Read(ref _remoteIngressEnabled) == 0)
+        {
+            Interlocked.Add(ref _rxBytesSkippedRemoteIngress, chunk.Data.Length);
+            return;
+        }
+
+        Interlocked.Increment(ref _ingressPublishInFlight);
+        try
+        {
+            // Re-check after joining the in-flight set — disable may have cleared the flag.
+            if (Volatile.Read(ref _remoteIngressEnabled) == 0)
+            {
+                Interlocked.Add(ref _rxBytesSkippedRemoteIngress, chunk.Data.Length);
+                return;
+            }
+
+            if (_incoming.Writer.TryWrite(chunk))
+            {
+                Interlocked.Add(ref _rxBytesPublished, chunk.Data.Length);
+            }
+            else
+            {
+                Interlocked.Add(ref _rxBytesSkippedRemoteIngress, chunk.Data.Length);
+                _logger.LogWarning(
+                    "Incoming serial channel rejected an RX chunk of {ByteCount} bytes (channel completed or full)",
+                    chunk.Data.Length);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _ingressPublishInFlight);
         }
     }
 
@@ -1114,6 +1259,7 @@ internal sealed class SerialConnectionService : ISerialConnectionService
         Interlocked.Exchange(ref _rxReadCalls, 0);
         Interlocked.Exchange(ref _rxZeroReads, 0);
         Interlocked.Exchange(ref _rxBytesPublished, 0);
+        Interlocked.Exchange(ref _rxBytesSkippedRemoteIngress, 0);
         Interlocked.Exchange(ref _rxUiNotifications, 0);
         Interlocked.Exchange(ref _lastLoggedRxBytes, 0);
         _lastReadError = null;

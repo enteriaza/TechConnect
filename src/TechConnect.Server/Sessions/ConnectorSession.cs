@@ -46,8 +46,60 @@ internal sealed class ConnectorSession
     /// <summary>UTC time when the session was registered.</summary>
     public DateTimeOffset ConnectedAtUtc { get; init; }
 
+    /// <summary>
+    /// UTC ticks of last framed protocol activity (<see cref="DateTimeOffset.UtcTicks"/>),
+    /// or 0 when unset. Updated without the registry gate on the connector RX hot path (PERF-SRV-02).
+    /// </summary>
+    private long _lastActivityUtcTicks;
+
     /// <summary>UTC time of last framed protocol activity for this connection, if tracked.</summary>
-    public DateTimeOffset? LastActivityUtc { get; set; }
+    /// <remarks>
+    /// Stored as UTC ticks with <see cref="Volatile"/> / <see cref="Interlocked"/> so activity
+    /// touches do not require <see cref="ConnectorSessionRegistry"/>'s global lock (PERF-SRV-02).
+    /// <see cref="ObserveActivity"/> advances the timestamp monotonically under concurrent writers.
+    /// Display/snapshot readers may observe a slightly stale value.
+    /// </remarks>
+    public DateTimeOffset? LastActivityUtc
+    {
+        get
+        {
+            var ticks = Volatile.Read(ref _lastActivityUtcTicks);
+            return ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+        set => Volatile.Write(ref _lastActivityUtcTicks, value?.UtcTicks ?? 0);
+    }
+
+    /// <summary>
+    /// Records protocol activity at <paramref name="utcNow"/> if it is strictly newer than the
+    /// current <see cref="LastActivityUtc"/>.
+    /// </summary>
+    /// <param name="utcNow">Candidate activity timestamp (UTC).</param>
+    /// <remarks>
+    /// Safe for concurrent callers (connector RX hot path and <c>TouchActivity</c>). Never moves
+    /// the stored timestamp backwards.
+    /// </remarks>
+    public void ObserveActivity(DateTimeOffset utcNow)
+    {
+        var ticks = utcNow.UtcTicks;
+        if (ticks <= 0)
+        {
+            return;
+        }
+
+        while (true)
+        {
+            var current = Volatile.Read(ref _lastActivityUtcTicks);
+            if (ticks <= current)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _lastActivityUtcTicks, ticks, current) == current)
+            {
+                return;
+            }
+        }
+    }
 
     /// <summary>Negotiated TLS protocol name string recorded at registration, if any.</summary>
     public string? TlsProtocol { get; init; }

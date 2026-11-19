@@ -316,7 +316,16 @@ public sealed class InteractiveCliSessionTests
             }
         });
 
-        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("help\rexit\r"), cts.Token);
+        // Send help and wait for its output before exit so the assertion is not racing session teardown.
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("help\r"), cts.Token);
+        await WaitForAsync(() =>
+        {
+            lock (chunks)
+            {
+                return string.Concat(chunks).Contains("Available commands", StringComparison.Ordinal);
+            }
+        });
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("exit\r"), cts.Token);
         await run.WaitAsync(TimeSpan.FromSeconds(8));
         cts.Cancel();
         try

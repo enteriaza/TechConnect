@@ -222,21 +222,25 @@ internal sealed class ConnectorSessionRegistry
     /// </summary>
     /// <param name="connectionId">TCP connection ID.</param>
     /// <param name="utcNow">Activity timestamp to record.</param>
-    /// <remarks>No-op when the connection is not registered.</remarks>
+    /// <remarks>
+    /// Looks up the session under the registry gate, then writes the timestamp outside the lock
+    /// (PERF-SRV-02). The connector RX hot path prefers a cached
+    /// <see cref="TechConnect.Server.Connector.ConnectorConnection.RegisteredSession"/> and does
+    /// not call this method. No-op when the connection is not registered.
+    /// </remarks>
     public void TouchActivity(string connectionId, DateTimeOffset utcNow)
     {
+        ConnectorSession? session;
         lock (_gate)
         {
-            if (!_connectionIdToSessionId.TryGetValue(connectionId, out var sessionId))
+            if (!_connectionIdToSessionId.TryGetValue(connectionId, out var sessionId) ||
+                !_bySessionId.TryGetValue(sessionId, out session))
             {
                 return;
             }
-
-            if (_bySessionId.TryGetValue(sessionId, out var session))
-            {
-                session.LastActivityUtc = utcNow;
-            }
         }
+
+        session.ObserveActivity(utcNow);
     }
 
     /// <summary>Removes all sessions (for example during listener shutdown).</summary>

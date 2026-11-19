@@ -696,9 +696,10 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
         try
         {
             var ping = ControlMessageSerializer.DeserializeSessionPing(payload);
+            // SessionPingMessage is source-gen registered; anonymous payloads are not (AOT).
             var legacy = ControlProtocol.Create(
                 ControlProtocol.TypeSessionPing,
-                new { },
+                new SessionPingMessage { CorrelationId = ping.CorrelationId },
                 ping.CorrelationId);
             ControlMessageReceived?.Invoke(this, ControlProtocol.Serialize(legacy));
         }

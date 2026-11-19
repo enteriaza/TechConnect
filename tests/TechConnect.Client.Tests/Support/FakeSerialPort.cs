@@ -212,11 +212,14 @@ internal sealed class FakeSerialPort : ISerialPort
     /// <inheritdoc />
     public void Close()
     {
+        // Wake the stream outside _gate: SignalClosed may synchronously resume ReadAsync,
+        // which calls IsOpen and would otherwise deadlock on this lock.
         lock (_gate)
         {
             _isOpen = false;
-            _stream.SignalClosed();
         }
+
+        _stream.SignalClosed();
     }
 
     /// <summary>
@@ -224,12 +227,15 @@ internal sealed class FakeSerialPort : ISerialPort
     /// </summary>
     public void SimulateDeviceRemoval()
     {
+        // Fault outside _gate for the same reason as Close (SemaphoreSlim may resume
+        // ReadAsync synchronously → IsOpen → re-enter this lock).
         lock (_gate)
         {
             Options.Removed = true;
             _isOpen = false;
-            _stream.Fault(new IOException($"Device {PortName} was removed."));
         }
+
+        _stream.Fault(new IOException($"Device {PortName} was removed."));
     }
 
     /// <summary>Faults the base stream while leaving <see cref="IsOpen"/> true (write-path failures).</summary>

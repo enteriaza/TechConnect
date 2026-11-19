@@ -32,7 +32,9 @@ namespace TechConnect.Server.Attachment;
 /// </remarks>
 internal sealed class BoundedByteQueue
 {
-    /// <summary>FIFO of defensive payload copies awaiting SSH write.</summary>
+    /// <summary>
+    /// FIFO of owned payload arrays awaiting SSH write (defensive copies or transferred ownership).
+    /// </summary>
     private readonly Queue<byte[]> _queue = new();
 
     /// <summary>Signals that a chunk is available or that the queue completed.</summary>
@@ -96,6 +98,11 @@ internal sealed class BoundedByteQueue
     /// <see langword="false"/> when the queue is full or completed (overflow / closed).
     /// </returns>
     /// <exception cref="ObjectDisposedException">The queue has been disposed.</exception>
+    /// <remarks>
+    /// Capacity is checked before allocating the copy so overflow refusal does not create a
+    /// discarded array. Prefer <see cref="TryEnqueueOwned"/> when the caller already owns a
+    /// dedicated <see cref="byte"/> array (for example a <c>FrameReader</c> payload).
+    /// </remarks>
     public bool TryEnqueue(ReadOnlyMemory<byte> data)
     {
         if (data.IsEmpty)
@@ -103,7 +110,6 @@ internal sealed class BoundedByteQueue
             return true;
         }
 
-        var copy = data.ToArray();
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -112,13 +118,61 @@ internal sealed class BoundedByteQueue
                 return false;
             }
 
-            if (_queuedBytes + copy.Length > _maximumQueuedBytes)
+            if (_queuedBytes + data.Length > _maximumQueuedBytes)
             {
                 return false;
             }
 
+            // Allocate only after capacity acceptance (PERF-SRV-01).
+            var copy = data.ToArray();
             _queue.Enqueue(copy);
             _queuedBytes += copy.Length;
+        }
+
+        _available.Release();
+        return true;
+    }
+
+    /// <summary>
+    /// Attempts to enqueue <paramref name="data"/> by taking ownership of the array (no copy).
+    /// </summary>
+    /// <param name="data">
+    /// Caller-owned payload. On success the queue owns the array and the caller must not
+    /// mutate or reuse it. On refusal the caller retains ownership.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when accepted (including empty arrays);
+    /// <see langword="false"/> when the queue is full or completed (overflow / closed).
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ObjectDisposedException">The queue has been disposed.</exception>
+    /// <remarks>
+    /// Used on the connector SerialData path where <c>FrameReader</c> has already transferred
+    /// a dedicated payload array. Empty arrays succeed without enqueueing.
+    /// </remarks>
+    public bool TryEnqueueOwned(byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        if (data.Length == 0)
+        {
+            return true;
+        }
+
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_completed)
+            {
+                return false;
+            }
+
+            if (_queuedBytes + data.Length > _maximumQueuedBytes)
+            {
+                return false;
+            }
+
+            _queue.Enqueue(data);
+            _queuedBytes += data.Length;
         }
 
         _available.Release();

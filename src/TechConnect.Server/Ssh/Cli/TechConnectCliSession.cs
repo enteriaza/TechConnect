@@ -2721,13 +2721,18 @@ internal sealed class TechConnectCliSession
     /// <summary>
     /// Writes raw bytes to the SSH channel under the write gate.
     /// </summary>
+    /// <remarks>
+    /// Production uses <c>Microsoft.DevTunnels.Ssh.SshStream</c>: <c>WriteAsync</c> already
+    /// calls <c>Channel.SendAsync</c> (data is sent immediately), and <c>Flush</c> is a no-op
+    /// (<c>CheckDisposed</c> only). Awaiting <c>FlushAsync</c> after every write added measurable
+    /// Task/await overhead without changing on-wire behaviour (PERF-SRV-03).
+    /// </remarks>
     private async Task WriteRawAsync(ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await _stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {

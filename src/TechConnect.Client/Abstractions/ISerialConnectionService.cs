@@ -19,9 +19,9 @@ namespace TechConnect.Client.Abstractions;
 /// <remarks>
 /// <para>
 /// Open/close/write/apply operations are serialized. An unbounded
-/// <see cref="Incoming"/> channel republishes RX chunks for remote bridging; the
-/// channel completes when the port closes. Payloads must never be written to
-/// application logs.
+/// <see cref="Incoming"/> channel republishes RX chunks for remote bridging only
+/// while <see cref="SetRemoteIngressEnabled"/> is true; the channel completes when
+/// the port closes. Payloads must never be written to application logs.
 /// </para>
 /// <para>
 /// <see cref="DataTransferred"/> and <see cref="Faulted"/> may be raised on
@@ -52,10 +52,49 @@ public interface ISerialConnectionService : IAsyncDisposable
     /// RX stream for remote session consumers. Completes when the port closes.
     /// </summary>
     /// <remarks>
-    /// Multiple readers are allowed. Payloads must never be logged. Before the first
-    /// open, the channel may already be completed so idle consumers do not hang.
+    /// Multiple readers are allowed. Chunks are written only while remote ingress is
+    /// enabled (see <see cref="SetRemoteIngressEnabled"/>). Payloads must never be
+    /// logged. Before the first open, the channel may already be completed so idle
+    /// consumers do not hang.
     /// </remarks>
     ChannelReader<SerialDataChunk> Incoming { get; }
+
+    /// <summary>
+    /// Whether RX octets are currently published onto <see cref="Incoming"/> for remote bridging.
+    /// </summary>
+    /// <remarks>
+    /// Independent of whether the serial port is open. Defaults to <see langword="false"/>
+    /// so local-console-only operation cannot accumulate unbounded remote-queue memory.
+    /// </remarks>
+    bool IsRemoteIngressEnabled { get; }
+
+    /// <summary>
+    /// Enables or disables publication of RX octets onto <see cref="Incoming"/>.
+    /// </summary>
+    /// <param name="enabled">
+    /// When <see langword="true"/>, subsequent RX chunks are written to <see cref="Incoming"/>.
+    /// When <see langword="false"/>, RX continues for the local console via
+    /// <see cref="DataTransferred"/> but is not enqueued for remote delivery.
+    /// </param>
+    /// <remarks>
+    /// Remote session code must enable ingress only while a bridge consumer is (or will
+    /// immediately be) running, and disable it after that consumer has stopped. Disabling
+    /// waits for any in-flight publish that already observed the enabled state, so a following
+    /// <see cref="DrainPendingRemoteIngress"/> cannot miss a late enqueue. Disabling does not
+    /// close the serial port. Payloads are never logged.
+    /// </remarks>
+    void SetRemoteIngressEnabled(bool enabled);
+
+    /// <summary>
+    /// Drains any chunks already queued on <see cref="Incoming"/> without forwarding them.
+    /// </summary>
+    /// <returns>Total payload bytes discarded from the channel.</returns>
+    /// <remarks>
+    /// Intended for use after the remote bridge consumer has stopped so leftover items
+    /// cannot retain memory. Counts toward skipped-remote-ingress diagnostics. Does not
+    /// log payloads and does not affect the serial port.
+    /// </remarks>
+    int DrainPendingRemoteIngress();
 
     /// <summary>
     /// Returns cumulative serial traffic counters for the current open cycle.
@@ -83,8 +122,20 @@ public interface ISerialConnectionService : IAsyncDisposable
     /// Raised for each RX or TX chunk published for UI display.
     /// </summary>
     /// <remarks>
-    /// TX chunks are raised after a successful local write path; they are not
-    /// published onto <see cref="Incoming"/>. Payloads must never be logged.
+    /// <para>
+    /// TX chunks are raised after a successful local write path with a durable payload copy;
+    /// they are not published onto <see cref="Incoming"/>. Payloads must never be logged.
+    /// </para>
+    /// <para>
+    /// <b>RX lifetime (PERF-CLI-01):</b> When <see cref="IsRemoteIngressEnabled"/> was false at
+    /// the reader’s ownership decision for that read, <see cref="SerialDataChunk.Data"/> may be
+    /// an ephemeral view over the reusable read buffer — valid only until the handler returns.
+    /// The production UI copies into <c>SerialConsoleBuffer</c> synchronously. Do not retain,
+    /// queue, or await on that memory. When ingress was enabled for that read, the payload is
+    /// durable and may also appear on <see cref="Incoming"/>. Ephemeral payloads are never
+    /// written to <see cref="Incoming"/>. The event API cannot enforce this; subscribers must
+    /// honour it.
+    /// </para>
     /// </remarks>
     event EventHandler<SerialDataChunk>? DataTransferred;
 

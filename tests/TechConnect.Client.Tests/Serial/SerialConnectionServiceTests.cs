@@ -329,8 +329,20 @@ public sealed class SerialConnectionServiceTests
             }
         });
 
-        await Task.Delay(50);
-        write.IsCompleted.Should().BeFalse(because: "write must wait for the reconfigure gate");
+        // Poll briefly while apply holds the gate — a single fixed delay was timing-flaky under suite load.
+        var stillBlocked = false;
+        for (var i = 0; i < 40; i++)
+        {
+            if (!write.IsCompleted)
+            {
+                stillBlocked = true;
+                break;
+            }
+
+            await Task.Delay(5);
+        }
+
+        stillBlocked.Should().BeTrue(because: "write must wait for the reconfigure gate");
         releaseApply.Set();
         await Task.WhenAll(apply, write);
 
@@ -528,6 +540,8 @@ public sealed class SerialConnectionServiceTests
         var (service, factory, _, time) = Create();
         await using var _ = service;
         await service.OpenAsync("COM1", null, CancellationToken.None);
+        // Incoming publication requires remote ingress (armed by RemoteSessionService in production).
+        service.SetRemoteIngressEnabled(true);
 
         var received = new List<string>();
         service.DataTransferred += (_, chunk) =>

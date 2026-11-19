@@ -45,6 +45,28 @@ public sealed class SerialReceiveDiagnostics
     public long BytesPublishedToIncomingChannel { get; init; }
 
     /// <summary>
+    /// RX bytes that did not remain available for remote bridging via <c>Incoming</c>.
+    /// </summary>
+    /// <remarks>
+    /// Includes bytes never published because remote ingress was disabled (or raced to disable),
+    /// bytes rejected by a failed <c>TryWrite</c>, and bytes removed by
+    /// <c>DrainPendingRemoteIngress</c> after the bridge stopped. Local console delivery via
+    /// <c>DataTransferred</c> is independent and still occurs for port RX.
+    /// </remarks>
+    public long BytesSkippedRemoteIngressDisabled { get; init; }
+
+    /// <summary>
+    /// Whether remote ingress publication onto <c>Incoming</c> is currently enabled.
+    /// </summary>
+    public bool IsRemoteIngressEnabled { get; init; }
+
+    /// <summary>
+    /// Items currently buffered in <c>Incoming</c> when the channel supports counting;
+    /// otherwise <c>-1</c>.
+    /// </summary>
+    public int PendingIncomingItems { get; init; }
+
+    /// <summary>
     /// Bytes delivered via the UI <c>DataTransferred</c> event for RX.
     /// </summary>
     public long BytesDeliveredToDataTransferred { get; init; }
