@@ -1,4 +1,10 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    StuDev.AotAnywhere enables Native AOT cross-compilation to linux-x64 from Windows
+    (Zig linker/sysroot). Used by tools/Publish-Release.ps1; pinned in global.json.
+    On a Windows host publishing win-x64, the SDK links with the native MSVC toolchain.
+  -->
+  <Sdk Name="StuDev.AotAnywhere" Version="1.1.0" />
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>

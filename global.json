@@ -2,5 +2,8 @@
   "sdk": {
     "version": "10.0.404",
     "rollForward": "latestPatch"
+  },
+  "msbuild-sdks": {
+    "StuDev.AotAnywhere": "1.1.0"
   }
 }

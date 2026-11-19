@@ -10,6 +10,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using TechConnect.Protocol.Messages;
 
 namespace TechConnect.Protocol.Serialization;
@@ -29,13 +30,19 @@ public static class ControlMessageSerializer
     /// <summary>
     /// Shared JSON options: camelCase, case-insensitive reads, nulls omitted when writing, no indentation.
     /// </summary>
-    public static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        WriteIndented = false
-    };
+    /// <remarks>
+    /// Backed by <see cref="ProtocolJsonContext"/> so Native AOT / trimmed publishes do not
+    /// require reflection-based serialization.
+    /// </remarks>
+    public static JsonSerializerOptions JsonOptions => ProtocolJsonContext.Default.Options;
+
+    /// <summary>
+    /// Resolves source-generated type info for <typeparamref name="T"/>.
+    /// </summary>
+    private static JsonTypeInfo<T> TypeInfo<T>() =>
+        (JsonTypeInfo<T>)(ProtocolJsonContext.Default.GetTypeInfo(typeof(T))
+            ?? throw new InvalidOperationException(
+                $"No System.Text.Json type info is registered for {typeof(T).FullName}."));
 
     /// <summary>
     /// Serializes a <see cref="HelloMessage"/> to UTF-8 JSON bytes after validation.
@@ -278,7 +285,7 @@ public static class ControlMessageSerializer
     {
         ArgumentNullException.ThrowIfNull(message);
         validate(message);
-        return JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions);
+        return JsonSerializer.SerializeToUtf8Bytes(message, TypeInfo<T>());
     }
 
     /// <summary>
@@ -301,7 +308,7 @@ public static class ControlMessageSerializer
         T? message;
         try
         {
-            message = JsonSerializer.Deserialize<T>(payload, JsonOptions);
+            message = JsonSerializer.Deserialize(payload, TypeInfo<T>());
         }
         catch (JsonException ex)
         {

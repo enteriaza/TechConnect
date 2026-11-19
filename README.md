@@ -38,7 +38,9 @@ tests/
   TechConnect.Protocol.Tests/
   TechConnect.Server.Tests/
 tools/
+  Publish-Release.ps1
   TechConnect.Client.DevCerts/
+release/                  # Publish-Release.ps1 output (gitignored)
 docs/
   TechConnect/
   TechConnect.Client/
@@ -99,6 +101,19 @@ dotnet run --project src/TechConnect.Client
 
 Publish produces `TechConnect.Client.exe` (`AssemblyName` = `TechConnect.Client`).
 
+## Release publishing
+
+Publish release binaries into the repository-root `release` directory:
+
+```powershell
+powershell -NoProfile -File .\tools\Publish-Release.ps1 -Platform all
+```
+
+- Client: `win-x64` self-contained **non-AOT** (WinForms; bundled .NET runtime; Linux unsupported).
+- Server: `win-x64` and `linux-x64` **Native AOT** (Linux cross-compile from Windows uses **StuDev.AotAnywhere**).
+
+Details: [docs/TechConnect/publish-release.md](docs/TechConnect/publish-release.md).
+
 ## Documentation
 
 | Topic | Path |
@@ -108,6 +123,7 @@ Publish produces `TechConnect.Client.exe` (`AssemblyName` = `TechConnect.Client`
 | SSH CLI | [docs/TechConnect/cli.md](docs/TechConnect/cli.md) |
 | Authentication | [docs/TechConnect/authentication.md](docs/TechConnect/authentication.md) |
 | NOC qualification checklist | [docs/TechConnect/noc-qualification.md](docs/TechConnect/noc-qualification.md) |
+| Release publishing | [docs/TechConnect/publish-release.md](docs/TechConnect/publish-release.md) |
 | Development certificates | [docs/TechConnect.Client/development-certificates.md](docs/TechConnect.Client/development-certificates.md) |
 | Serial RX diagnostics | [docs/TechConnect.Client/serial-rx-diagnostics.md](docs/TechConnect.Client/serial-rx-diagnostics.md) |
 | Server operations | [src/TechConnect.Server/README.md](src/TechConnect.Server/README.md) |

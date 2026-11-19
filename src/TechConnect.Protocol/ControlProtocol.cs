@@ -10,6 +10,8 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
+using TechConnect.Protocol.Serialization;
 
 namespace TechConnect.Protocol;
 
@@ -84,16 +86,18 @@ public static class ControlProtocol
     /// Shared <see cref="JsonSerializerOptions"/> for legacy envelope serialization.
     /// </summary>
     /// <remarks>
-    /// Uses camelCase names, case-insensitive property matching, omits nulls when writing,
-    /// and does not indent.
+    /// Backed by <see cref="ProtocolJsonContext"/> (camelCase, case-insensitive reads,
+    /// nulls omitted, no indentation) for Native AOT compatibility.
     /// </remarks>
-    public static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        WriteIndented = false
-    };
+    public static JsonSerializerOptions JsonOptions => ProtocolJsonContext.Default.Options;
+
+    /// <summary>
+    /// Resolves source-generated type info for <typeparamref name="T"/>.
+    /// </summary>
+    private static JsonTypeInfo<T> TypeInfo<T>() =>
+        (JsonTypeInfo<T>)(ProtocolJsonContext.Default.GetTypeInfo(typeof(T))
+            ?? throw new InvalidOperationException(
+                $"No System.Text.Json type info is registered for {typeof(T).FullName}."));
 
     /// <summary>
     /// Returns whether <paramref name="baudRate"/> appears in <see cref="SupportedBaudRates"/>.
@@ -110,7 +114,9 @@ public static class ControlProtocol
     /// <returns>Compact UTF-16 JSON string.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="message"/> is <see langword="null"/>.</exception>
     public static string Serialize(ControlMessage message) =>
-        JsonSerializer.Serialize(message ?? throw new ArgumentNullException(nameof(message)), JsonOptions);
+        JsonSerializer.Serialize(
+            message ?? throw new ArgumentNullException(nameof(message)),
+            ProtocolJsonContext.Default.ControlMessage);
 
     /// <summary>
     /// Attempts to deserialize and validate a legacy control envelope JSON string.
@@ -135,7 +141,7 @@ public static class ControlProtocol
 
         try
         {
-            message = JsonSerializer.Deserialize<ControlMessage>(json, JsonOptions);
+            message = JsonSerializer.Deserialize(json, ProtocolJsonContext.Default.ControlMessage);
         }
         catch (JsonException ex)
         {
@@ -183,7 +189,7 @@ public static class ControlProtocol
             V = Version,
             Type = type,
             CorrelationId = correlationId,
-            Payload = JsonSerializer.SerializeToElement(payload, JsonOptions)
+            Payload = JsonSerializer.SerializeToElement(payload, TypeInfo<TPayload>())
         };
     }
 
@@ -208,7 +214,7 @@ public static class ControlProtocol
 
         try
         {
-            payload = message.Payload.Value.Deserialize<TPayload>(JsonOptions);
+            payload = message.Payload.Value.Deserialize(TypeInfo<TPayload>());
         }
         catch (JsonException ex)
         {
