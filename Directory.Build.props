@@ -1,0 +1,5 @@
+<Project>
+  <!-- Repository defaults for SDK-style projects. -->
+  <Import Project="build\TechConnect.Net10.Defaults.props" Condition="'$(TechConnectNet10DefaultsImported)' != 'true'" />
+  <Import Project="build\TechConnect.EnforceNet10.targets" Condition="'$(TechConnectEnforceNet10Imported)' != 'true'" />
+</Project>

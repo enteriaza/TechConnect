@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <TechConnectNet10DefaultsImported>true</TechConnectNet10DefaultsImported>
+    <!-- Default only when the project omits both TargetFramework and TargetFrameworks. -->
+    <TargetFramework Condition="'$(TargetFramework)' == '' and '$(TargetFrameworks)' == ''">net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>

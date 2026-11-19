@@ -1,0 +1,9 @@
+{
+  "caSubject": "CN=TechConnector Development CA",
+  "serverSubject": "CN=TechConnector Development WSS",
+  "clientSubject": "CN=TechConnector Development Client",
+  "caThumbprint": "<run: dotnet run --project tools/TechConnect.Client.DevCerts -- provision>",
+  "serverThumbprint": "<provisioned>",
+  "clientThumbprint": "<provisioned>",
+  "updatedUtc": "0001-01-01T00:00:00+00:00"
+}

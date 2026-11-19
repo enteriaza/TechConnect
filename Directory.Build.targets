@@ -1,0 +1,7 @@
+<Project>
+  <!--
+    Late enforcement redefine. Runs after the project body so a project-local
+    Target named TechConnectEnforceNet10Only cannot neutralize the policy.
+  -->
+  <Import Project="build\TechConnect.EnforceNet10.Final.targets" />
+</Project>

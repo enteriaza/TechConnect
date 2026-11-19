@@ -1,0 +1,26 @@
+<Project InitialTargets="TechConnectEnforceNet10Only">
+  <PropertyGroup>
+    <TechConnectEnforceNet10Imported>true</TechConnectEnforceNet10Imported>
+    <TechConnectNet10PolicyActive>true</TechConnectNet10PolicyActive>
+  </PropertyGroup>
+
+  <Target Name="TechConnectEnforceNet10Only"
+          BeforeTargets="PrepareForBuild;ProcessFrameworkReferences;CoreCompile">
+    <PropertyGroup>
+      <!-- Allow net10.0 and Windows OS-specific TFMs required by WinForms/WPF (e.g. net10.0-windows). -->
+      <TechConnectIsAllowedNet10TargetFramework Condition="'$(TargetFramework)' == 'net10.0' or $(TargetFramework.StartsWith('net10.0-windows'))">true</TechConnectIsAllowedNet10TargetFramework>
+    </PropertyGroup>
+
+    <Error
+      Condition="'$(TargetFrameworks)' != ''"
+      Text="TechConnect supports .NET 10 only. Multi-targeting via TargetFrameworks is not allowed (project '$(MSBuildProjectName)' declares TargetFrameworks='$(TargetFrameworks)'). Use TargetFramework=net10.0 (or net10.0-windows for Windows desktop apps)." />
+
+    <Error
+      Condition="'$(TargetFrameworks)' == '' AND '$(TargetFramework)' != '' AND '$(TechConnectIsAllowedNet10TargetFramework)' != 'true'"
+      Text="TechConnect supports .NET 10 only. Project '$(MSBuildProjectName)' targets '$(TargetFramework)'; change TargetFramework to net10.0 (or net10.0-windows for Windows desktop apps)." />
+
+    <Error
+      Condition="'$(TargetFrameworks)' == '' AND '$(TargetFramework)' == ''"
+      Text="TechConnect supports .NET 10 only. Project '$(MSBuildProjectName)' has no TargetFramework; set TargetFramework to net10.0 (or inherit the repository Directory.Build.props default)." />
+  </Target>
+</Project>

@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TechConnect.Client/TechConnect.Client.csproj" />
+    <Project Path="src/TechConnect.Protocol/TechConnect.Protocol.csproj" />
+    <Project Path="src/TechConnect.Server/TechConnect.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TechConnect.Client.Tests/TechConnect.Client.Tests.csproj" />
+    <Project Path="tests/TechConnect.Protocol.Tests/TechConnect.Protocol.Tests.csproj" />
+    <Project Path="tests/TechConnect.Server.Tests/TechConnect.Server.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/TechConnect.Client.DevCerts/TechConnect.Client.DevCerts.csproj" />
+  </Folder>
+</Solution>

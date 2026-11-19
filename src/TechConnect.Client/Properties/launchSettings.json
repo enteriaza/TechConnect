@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "TechConnect.Client": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
