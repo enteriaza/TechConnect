@@ -59,9 +59,21 @@ public sealed class RemoteServiceOptionsValidator : IValidateOptions<RemoteServi
             failures.Add("RemoteService:ConnectTimeoutSeconds must be at least 1.");
         }
 
-        if (options.MaximumMessageBytes < 1024)
+        if (options.MaximumMessageBytes < RemoteServiceOptions.MinimumMaximumMessageBytes)
         {
-            failures.Add("RemoteService:MaximumMessageBytes must be at least 1024.");
+            failures.Add(
+                $"RemoteService:MaximumMessageBytes must be at least {RemoteServiceOptions.MinimumMaximumMessageBytes}.");
+        }
+        else if (options.MaximumMessageBytes > RemoteServiceOptions.AbsoluteMaximumMessageBytes)
+        {
+            failures.Add(
+                $"RemoteService:MaximumMessageBytes must not exceed {RemoteServiceOptions.AbsoluteMaximumMessageBytes}.");
+        }
+
+        if (!Enum.IsDefined(options.CertificateRevocationMode))
+        {
+            failures.Add(
+                "RemoteService:CertificateRevocationMode must be NoCheck, Online, or Offline.");
         }
 
         var reconnect = options.Reconnect ?? new ReconnectOptions();

@@ -700,6 +700,15 @@ internal sealed class FakeSerialConnectionService : ISerialConnectionService
     }
 
     /// <summary>
+    /// Completes the Incoming channel, optionally with an error (surfaces to RX bridge readers).
+    /// </summary>
+    /// <param name="error">
+    /// When non-null, <see cref="Incoming"/> consumers observe this exception after queued items.
+    /// </param>
+    public void CompleteIncoming(Exception? error = null) =>
+        _incoming.Writer.TryComplete(error);
+
+    /// <summary>
     /// Raises <see cref="Faulted"/> with the given message.
     /// </summary>
     public void RaiseFault(string message) => Faulted?.Invoke(this, message);

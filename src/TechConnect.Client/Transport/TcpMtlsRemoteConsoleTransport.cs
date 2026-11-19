@@ -37,7 +37,10 @@ namespace TechConnect.Client.Transport;
 /// authenticates as a TLS client with a required client certificate from
 /// <see cref="IClientCertificateProvider"/>, and requires
 /// <see cref="SslStream.IsMutuallyAuthenticated"/>. Offered protocols are TLS 1.2 and 1.3;
-/// revocation is <see cref="X509RevocationMode.NoCheck"/>.
+/// revocation checking follows <see cref="RemoteServiceOptions.CertificateRevocationMode"/>
+/// (default <see cref="X509RevocationMode.NoCheck"/> for field/cellular deployments).
+/// Platform chain trust and hostname/SAN validation remain enabled; there is no
+/// accept-any-certificate path.
 /// </para>
 /// <para>
 /// After mTLS succeeds, a <see cref="ProtocolSession"/> owns framing on the
@@ -224,14 +227,16 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
                     userCertificateValidationCallback: null);
 
                 var clientCertificates = new X509Certificate2Collection(clientCertificate);
+                var revocationMode = options.CertificateRevocationMode;
+                _logger.LogInformation(
+                    "TCP/mTLS certificate revocation check mode is {RevocationMode}",
+                    revocationMode);
+
                 await ssl.AuthenticateAsClientAsync(
-                        new SslClientAuthenticationOptions
-                        {
-                            TargetHost = tlsHostName,
-                            ClientCertificates = clientCertificates,
-                            EnabledSslProtocols = SupportedSslProtocols,
-                            CertificateRevocationCheckMode = X509RevocationMode.NoCheck
-                        },
+                        CreateSslClientAuthenticationOptions(
+                            tlsHostName,
+                            clientCertificates,
+                            revocationMode),
                         connectCts.Token)
                     .ConfigureAwait(false);
 
@@ -241,14 +246,7 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
                         "TCP/TLS handshake completed without mutual authentication.");
                 }
 
-                var limits = new ProtocolLimits
-                {
-                    MaxSerialDataPayloadBytes = Math.Max(1024, options.MaximumMessageBytes),
-                    MaxFramePayloadBytes = Math.Max(
-                        ProtocolLimits.DefaultMaxFramePayloadBytes,
-                        Math.Max(1024, options.MaximumMessageBytes)),
-                    MaxControlPayloadBytes = ProtocolLimits.DefaultMaxControlPayloadBytes
-                };
+                var limits = CreateProtocolLimits(options);
 
                 _tcpClient = tcp;
                 _sslStream = ssl;
@@ -262,9 +260,10 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
                     CancellationToken.None);
 
                 _logger.LogInformation(
-                    "TCP/mTLS connected. Protocol={Protocol}, Cipher={Cipher}",
+                    "TCP/mTLS connected. Protocol={Protocol}, Cipher={Cipher}, MaxMessageBytes={MaxMessageBytes}",
                     ssl.SslProtocol,
-                    ssl.NegotiatedCipherSuite);
+                    ssl.NegotiatedCipherSuite,
+                    options.MaximumMessageBytes);
 
                 tcp = null!;
                 ssl = null;
@@ -826,5 +825,53 @@ internal sealed class TcpMtlsRemoteConsoleTransport : IRemoteConsoleTransport
         {
             _logger.LogDebug(ex, "Faulted event handler threw");
         }
+    }
+
+    /// <summary>
+    /// Builds SSL client authentication options for the outbound mTLS handshake.
+    /// </summary>
+    /// <remarks>
+    /// Exposed to tests so the configured revocation mode can be asserted without performing
+    /// a live handshake. Does not weaken chain or hostname validation.
+    /// </remarks>
+    /// <param name="tlsHostName">Target host name used for certificate name validation.</param>
+    /// <param name="clientCertificates">Client certificate collection (required for mTLS).</param>
+    /// <param name="revocationMode">Configured <see cref="X509RevocationMode"/>.</param>
+    /// <returns>Options passed to <c>SslStream.AuthenticateAsClientAsync(SslClientAuthenticationOptions, CancellationToken)</c>.</returns>
+    internal static SslClientAuthenticationOptions CreateSslClientAuthenticationOptions(
+        string tlsHostName,
+        X509Certificate2Collection clientCertificates,
+        X509RevocationMode revocationMode) =>
+        new()
+        {
+            TargetHost = tlsHostName,
+            ClientCertificates = clientCertificates,
+            EnabledSslProtocols = SupportedSslProtocols,
+            CertificateRevocationCheckMode = revocationMode
+        };
+
+    /// <summary>
+    /// Maps validated <see cref="RemoteServiceOptions.MaximumMessageBytes"/> onto protocol limits.
+    /// </summary>
+    /// <remarks>
+    /// Frame and serial-data ceilings equal the configured maximum so the transport cannot
+    /// accept larger inbound payloads than configuration validation allowed. Control payloads
+    /// remain capped at the protocol control default when the message maximum is larger.
+    /// </remarks>
+    /// <param name="options">Validated remote service options.</param>
+    /// <returns>Protocol limits applied to the framed session.</returns>
+    internal static ProtocolLimits CreateProtocolLimits(RemoteServiceOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var maxMessageBytes = options.MaximumMessageBytes;
+        return new ProtocolLimits
+        {
+            MaxSerialDataPayloadBytes = maxMessageBytes,
+            MaxFramePayloadBytes = maxMessageBytes,
+            MaxControlPayloadBytes = Math.Min(
+                ProtocolLimits.DefaultMaxControlPayloadBytes,
+                maxMessageBytes)
+        };
     }
 }

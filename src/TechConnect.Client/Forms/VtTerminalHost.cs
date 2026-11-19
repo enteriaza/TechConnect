@@ -174,6 +174,25 @@ internal sealed class VtTerminalHost : IDisposable
     }
 
     /// <summary>
+    /// Abandons incomplete VT parser state after display-buffer overflow drops.
+    /// </summary>
+    /// <remarks>
+    /// Uses XTerm.NET <see cref="Terminal.Reset"/> (full reset). SoftReset (DECSTR) was
+    /// verified insufficient to abandon an incomplete CSI/escape sequence in XTerm.NET 3.0.3
+    /// (a subsequent printable could still be consumed as the CSI final). Reset clears
+    /// parser state and restores default modes/screen so later output is not permanently
+    /// corrupted. Does not close the serial port or remote transport. Call only when
+    /// <see cref="SerialConsoleBuffer"/> reports overflow drops — not on every normal flush.
+    /// </remarks>
+    public void ResyncAfterDisplayOverflow()
+    {
+        ThrowIfDisposed();
+        _terminal.Reset();
+        // Match post-clear blank policy until device output arrives again on this path.
+        _terminal.CursorVisible = _hasReceivedOutput;
+    }
+
+    /// <summary>
     /// Returns the visible viewport lines joined by <paramref name="separator"/>.
     /// </summary>
     /// <param name="separator">Separator between rows.</param>

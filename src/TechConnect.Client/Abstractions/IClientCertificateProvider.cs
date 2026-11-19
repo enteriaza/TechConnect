@@ -39,9 +39,16 @@ public interface IClientCertificateProvider
     /// or <see langword="null"/> when no thumbprint is configured.
     /// </returns>
     /// <remarks>
+    /// <para>
+    /// A null return means no thumbprint is configured. TechConnect.Client’s TCP/mTLS
+    /// transport requires a client certificate for mutual authentication and will reject
+    /// null with a configuration error — mTLS is mandatory for the remote console path.
+    /// </para>
+    /// <para>
     /// Throws when a thumbprint is configured but the certificate cannot be used
     /// (missing, ambiguous, expired, lacking a private key, failing EKU/subject/issuer checks,
     /// or store open failures). Does not log private keys or full secrets.
+    /// </para>
     /// </remarks>
     /// <exception cref="TechConnect.Client.Transport.RemoteTransportConfigurationException">
     /// A thumbprint is configured but the certificate cannot be loaded or validated.

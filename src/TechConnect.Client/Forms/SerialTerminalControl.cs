@@ -93,6 +93,25 @@ internal sealed class SerialTerminalControl : Control
     }
 
     /// <summary>
+    /// Resynchronizes the VT parser after display-buffer overflow drops, then writes.
+    /// </summary>
+    /// <param name="data">Bytes drained from <see cref="SerialConsoleBuffer"/> after overflow.</param>
+    /// <remarks>
+    /// Does not close the serial port or remote transport. Performs a full terminal
+    /// <c>Reset</c> to abandon incomplete UTF-8/VT parser state after overflow drops.
+    /// </remarks>
+    public void WriteAfterDisplayOverflow(ReadOnlySpan<byte> data)
+    {
+        if (_isDisposing || IsDisposed)
+        {
+            return;
+        }
+
+        _host.ResyncAfterDisplayOverflow();
+        Write(data);
+    }
+
+    /// <summary>
     /// Clears pending screen/scrollback state and repaints a blank terminal.
     /// </summary>
     public void ClearTerminal()

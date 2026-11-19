@@ -937,7 +937,7 @@ public partial class MainForm : Form
         if (droppedSincePreviousDrain > 0)
         {
             _logger.LogWarning(
-                "Local console display buffer exceeded capacity; dropped {DroppedBytes} pending display bytes (serial transport unaffected)",
+                "Local console display buffer exceeded capacity; dropped {DroppedBytes} pending display bytes (serial transport unaffected); resynchronizing terminal parser",
                 droppedSincePreviousDrain);
         }
 
@@ -946,7 +946,16 @@ public partial class MainForm : Form
             return;
         }
 
-        _consoleTerminal.Write(data);
+        // Overflow drops can split UTF-8 / VT sequences; reset parser before writing remainder.
+        if (droppedSincePreviousDrain > 0)
+        {
+            _consoleTerminal.WriteAfterDisplayOverflow(data);
+        }
+        else
+        {
+            _consoleTerminal.Write(data);
+        }
+
         UpdateTrafficUi(force: false);
     }
 

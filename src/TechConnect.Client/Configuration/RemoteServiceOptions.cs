@@ -9,6 +9,7 @@
 // -----------------------------------------------------------------------------
 
 using System.Security.Cryptography.X509Certificates;
+using TechConnect.Protocol;
 
 namespace TechConnect.Client.Configuration;
 
@@ -53,14 +54,57 @@ public sealed class RemoteServiceOptions
     public int ConnectTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
+    /// Minimum accepted <see cref="MaximumMessageBytes"/> (1 KiB).
+    /// </summary>
+    public const int MinimumMaximumMessageBytes = 1024;
+
+    /// <summary>
+    /// Hard upper bound for <see cref="MaximumMessageBytes"/> (64 KiB).
+    /// </summary>
+    /// <remarks>
+    /// Aligned with <see cref="ProtocolLimits.DefaultMaxFramePayloadBytes"/> so the Client
+    /// cannot accept larger frames than the protocol default ceiling used by TechConnect.Server.
+    /// Serial console traffic is chunked well below this; raising it would only increase
+    /// inbound allocation exposure on the connector.
+    /// </remarks>
+    public const int AbsoluteMaximumMessageBytes = ProtocolLimits.DefaultMaxFramePayloadBytes;
+
+    /// <summary>
+    /// Default <see cref="MaximumMessageBytes"/> (64 KiB).
+    /// </summary>
+    public const int DefaultMaximumMessageBytes = ProtocolLimits.DefaultMaxFramePayloadBytes;
+
+    /// <summary>
     /// Maximum serial/control payload size in bytes accepted by the TCP/mTLS transport.
     /// </summary>
     /// <remarks>
-    /// Used to size protocol payload limits (floored at 1024). Not a substitute for
-    /// TechConnect.Protocol frame limits beyond this options binding.
+    /// Applied directly as <see cref="ProtocolLimits.MaxFramePayloadBytes"/> and
+    /// <see cref="ProtocolLimits.MaxSerialDataPayloadBytes"/> for the session.
+    /// Must be between <see cref="MinimumMaximumMessageBytes"/> and
+    /// <see cref="AbsoluteMaximumMessageBytes"/> inclusive.
     /// </remarks>
-    /// <value>Defaults to 65536; must be at least 1024.</value>
-    public int MaximumMessageBytes { get; set; } = 65_536;
+    /// <value>Defaults to <see cref="DefaultMaximumMessageBytes"/>.</value>
+    public int MaximumMessageBytes { get; set; } = DefaultMaximumMessageBytes;
+
+    /// <summary>
+    /// TLS certificate revocation checking mode for the outbound mTLS handshake.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Default is <see cref="X509RevocationMode.NoCheck"/>: an explicit field-deployment
+    /// policy for connectors that often run on cellular or otherwise CRL/OCSP-unreachable
+    /// networks. Chain trust, expiry, and hostname/SAN validation remain enforced by the
+    /// platform regardless of this setting.
+    /// </para>
+    /// <para>
+    /// Set <see cref="X509RevocationMode.Offline"/> or <see cref="X509RevocationMode.Online"/>
+    /// when deployment PKI and network reachability support revocation checks. When those
+    /// modes are selected, revocation check failures fail the TLS handshake; there is no
+    /// silent fallback to <see cref="X509RevocationMode.NoCheck"/>.
+    /// </para>
+    /// </remarks>
+    /// <value>Defaults to <see cref="X509RevocationMode.NoCheck"/>.</value>
+    public X509RevocationMode CertificateRevocationMode { get; set; } = X509RevocationMode.NoCheck;
 
     /// <summary>
     /// Client certificate selection for mutual TLS.

@@ -23,8 +23,14 @@ namespace TechConnect.Client.Services;
 /// <remarks>
 /// <para>
 /// When no thumbprint is configured, <see cref="GetClientCertificate"/> returns
-/// <see langword="null"/> (transport may proceed without client cert depending on
-/// server policy). When configured, lookup failures and validation failures throw
+/// <see langword="null"/>. The production TCP/mTLS transport
+/// (<c>TcpMtlsRemoteConsoleTransport</c>) requires a non-null client certificate and
+/// rejects a null result with <see cref="RemoteTransportConfigurationException"/> —
+/// mutual TLS is mandatory. Returning null only signals “no thumbprint configured”;
+/// it is not an accept-without-client-certificate path for TechConnect.Server.
+/// </para>
+/// <para>
+/// When a thumbprint is configured, lookup failures and validation failures throw
 /// <see cref="RemoteTransportConfigurationException"/> (permanent for reconnect).
 /// </para>
 /// <para>

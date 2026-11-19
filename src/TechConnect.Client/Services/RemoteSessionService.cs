@@ -624,6 +624,12 @@ internal sealed class RemoteSessionService : IRemoteSessionService
     /// <summary>
     /// Drains local serial Incoming: enqueue when connected, discard when not (no outage replay).
     /// </summary>
+    /// <remarks>
+    /// Unexpected bridge failures are logged, raise <see cref="Faulted"/>, move the session to
+    /// <see cref="RemoteSessionState.Error"/>, keep draining Incoming (discard) so the unbounded
+    /// channel cannot grow, and finalize remote workers without closing the serial port.
+    /// Cancellation and normal Incoming completion are not treated as unexpected failures.
+    /// </remarks>
     private async Task BridgeSerialRxAsync(CancellationToken cancellationToken)
     {
         var buffer = _outboundBuffer;
@@ -631,6 +637,8 @@ internal sealed class RemoteSessionService : IRemoteSessionService
         {
             return;
         }
+
+        var bridgeFaulted = false;
 
         try
         {
@@ -642,15 +650,132 @@ internal sealed class RemoteSessionService : IRemoteSessionService
                     continue;
                 }
 
-                // Keep draining local Incoming so serial RX never blocks. While remote is down,
-                // discard for remote delivery — outage bytes must not survive reconnect.
-                if (_transport.IsConnected)
+                try
                 {
-                    buffer.Enqueue(chunk);
+                    // Keep draining local Incoming so serial RX never blocks. While remote is down
+                    // (or after an unexpected bridge fault), discard for remote delivery — outage
+                    // bytes must not survive reconnect / must not accumulate unboundedly.
+                    if (!bridgeFaulted && _transport.IsConnected)
+                    {
+                        buffer.Enqueue(chunk);
+                    }
+                    else
+                    {
+                        buffer.Discard(chunk);
+                    }
+
+                    PublishSnapshot(force: false);
                 }
-                else
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    if (!bridgeFaulted)
+                    {
+                        ObserveUnexpectedBridgeFailure(ex, cancellationToken);
+                        bridgeFaulted = true;
+                    }
+
+                    try
+                    {
+                        buffer.Discard(chunk);
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        return;
+                    }
+
+                    PublishSnapshot(force: false);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            if (!bridgeFaulted)
+            {
+                ObserveUnexpectedBridgeFailure(ex, cancellationToken);
+            }
+
+            await DiscardIncomingAfterBridgeFailureAsync(buffer, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Observes an unexpected RX bridge failure once, schedules remote-session finalization,
+    /// and leaves the serial port open.
+    /// </summary>
+    private void ObserveUnexpectedBridgeFailure(Exception ex, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        _logger.LogError(
+            ex,
+            "Serial→remote RX bridge failed. ClientSessionId={ClientSessionId}",
+            SessionId);
+
+        const string message = "Serial to remote bridge failed.";
+        SetState(RemoteSessionState.Error, message);
+        try
+        {
+            Faulted?.Invoke(this, message);
+        }
+        catch (Exception handlerEx)
+        {
+            _logger.LogDebug(handlerEx, "Faulted event handler threw after RX bridge failure");
+        }
+
+        PublishSnapshot();
+
+        // Finalize on a separate task so this bridge can exit after cancellation without
+        // deadlocking on WaitForBackgroundAsync(_rxBridgeTask).
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await FinalizeErrorSessionAsync(waitForReconnect: true).ConfigureAwait(false);
+                }
+                catch (Exception finalizeEx)
+                {
+                    _logger.LogError(
+                        finalizeEx,
+                        "Failed to finalize session after RX bridge failure. ClientSessionId={ClientSessionId}",
+                        SessionId);
+                }
+            },
+            CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Continues draining Incoming after a channel-level bridge failure so pending RX cannot
+    /// accumulate unboundedly until session cancellation.
+    /// </summary>
+    private async Task DiscardIncomingAfterBridgeFailureAsync(
+        RemoteOutboundBuffer buffer,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var chunk in _serialConnection.Incoming.ReadAllAsync(cancellationToken)
+                               .ConfigureAwait(false))
+            {
+                if (chunk.Direction != SerialDataDirection.Rx)
+                {
+                    continue;
+                }
+
+                try
                 {
                     buffer.Discard(chunk);
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
                 }
 
                 PublishSnapshot(force: false);
@@ -661,7 +786,10 @@ internal sealed class RemoteSessionService : IRemoteSessionService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Serial→remote RX bridge failed. ClientSessionId={ClientSessionId}", SessionId);
+            _logger.LogDebug(
+                ex,
+                "RX bridge discard loop ended after failure. ClientSessionId={ClientSessionId}",
+                SessionId);
         }
     }
 

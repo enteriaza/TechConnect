@@ -20,7 +20,8 @@ namespace TechConnect.Client.Forms;
 /// Only <see cref="SerialDataDirection.Rx"/> chunks are enqueued for display.
 /// When the pending display buffer exceeds its soft cap, the oldest pending bytes
 /// are dropped and counted in <see cref="PendingBytesDropped"/> — transport RX is
-/// never discarded by this component.
+/// never discarded by this component. Arbitrary drops can split UTF-8 or VT sequences;
+/// the UI flush path must resynchronize the terminal parser when drops are reported.
 /// </remarks>
 internal sealed class SerialConsoleBuffer
 {
@@ -54,6 +55,25 @@ internal sealed class SerialConsoleBuffer
         }
 
         _maxPendingBytes = maxPendingBytes;
+    }
+
+    /// <summary>
+    /// Soft maximum undrained pending display bytes.
+    /// </summary>
+    public int MaxPendingBytes => _maxPendingBytes;
+
+    /// <summary>
+    /// Current undrained pending display byte count (for tests and diagnostics).
+    /// </summary>
+    public int PendingByteCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _pending.Count;
+            }
+        }
     }
 
     /// <summary>
