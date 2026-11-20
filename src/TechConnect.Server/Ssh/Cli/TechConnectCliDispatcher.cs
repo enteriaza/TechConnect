@@ -14,6 +14,7 @@ using TechConnect.Server.Attachment;
 using TechConnect.Server.Audit;
 using TechConnect.Server.Authentication.Models;
 using TechConnect.Server.Authorization;
+using TechConnect.Server.Configuration.Management;
 using TechConnect.Server.Copy;
 using TechConnect.Server.Diagnostics;
 using TechConnect.Server.Inspection;
@@ -122,6 +123,9 @@ internal sealed class TechConnectCliDispatcher
     /// <summary>Operator CLI presence tracker for show users/terminal.</summary>
     private readonly SshOperatorSessionTracker _operatorSessions;
 
+    /// <summary>Configuration views for show running-config/startup-config (null when unavailable).</summary>
+    private readonly ConfigurationManagementService? _configuration;
+
     /// <summary>
     /// Initializes the dispatcher with required registries and optional test overrides.
     /// </summary>
@@ -138,6 +142,7 @@ internal sealed class TechConnectCliDispatcher
     /// <param name="interfaces">Optional interface inspector.</param>
     /// <param name="routes">Optional routing inspector.</param>
     /// <param name="operatorSessions">Optional operator session tracker.</param>
+    /// <param name="configuration">Optional configuration management service.</param>
     /// <exception cref="ArgumentNullException">A required dependency is <see langword="null"/>.</exception>
     public TechConnectCliDispatcher(
         ConnectorSessionRegistry sessionRegistry,
@@ -152,7 +157,8 @@ internal sealed class TechConnectCliDispatcher
         IDnsConfigurationProvider? dnsConfiguration = null,
         INetworkInterfaceInspector? interfaces = null,
         IRoutingTableInspector? routes = null,
-        SshOperatorSessionTracker? operatorSessions = null)
+        SshOperatorSessionTracker? operatorSessions = null,
+        ConfigurationManagementService? configuration = null)
     {
         _sessionRegistry = sessionRegistry ?? throw new ArgumentNullException(nameof(sessionRegistry));
         _attachmentManager = attachmentManager ?? throw new ArgumentNullException(nameof(attachmentManager));
@@ -171,6 +177,7 @@ internal sealed class TechConnectCliDispatcher
         _interfaces = interfaces ?? new SystemNetworkInterfaceInspector();
         _routes = routes ?? new UnsupportedRoutingTableInspector();
         _operatorSessions = operatorSessions ?? new SshOperatorSessionTracker();
+        _configuration = configuration;
     }
 
     /// <summary>
@@ -273,10 +280,53 @@ internal sealed class TechConnectCliDispatcher
             CliCommandId.Ping => ExecutePing(tokens),
             CliCommandId.Traceroute => ExecuteTraceroute(tokens),
             CliCommandId.Copy => ExecuteCopy(tokens, loginIdentity.OperatorSessionId),
+            CliCommandId.ConfigureTerminal => ExecuteConfigure(tokens),
+            CliCommandId.Write => ExecuteWriteOutsideConfiguration(tokens),
+            CliCommandId.ShowRunningConfig => new CliCommandResult(
+                CliCommandAction.Continue,
+                _configuration?.RenderRunning() ?? ConfigurationUnavailableMessage),
+            CliCommandId.ShowStartupConfig => new CliCommandResult(
+                CliCommandAction.Continue,
+                _configuration?.RenderStartup() ?? ConfigurationUnavailableMessage),
             _ => new CliCommandResult(
                 CliCommandAction.Continue,
                 OperatorAuthorizationService.PermissionDeniedMessage)
         };
+    }
+
+    /// <summary>Shown when the host did not provide configuration management.</summary>
+    internal const string ConfigurationUnavailableMessage = "% Configuration management is not available.";
+
+    /// <summary>
+    /// <c>configure [terminal]</c>: any prefix of <c>terminal</c> is accepted; other sources are rejected.
+    /// </summary>
+    private static CliCommandResult ExecuteConfigure(string[] tokens)
+    {
+        if (tokens.Length > 1 &&
+            !"terminal".StartsWith(tokens[1], StringComparison.OrdinalIgnoreCase))
+        {
+            return new CliCommandResult(
+                CliCommandAction.Continue,
+                "% Invalid input detected: configuration source is not supported. Use 'configure terminal'.");
+        }
+
+        return new CliCommandResult(CliCommandAction.EnterConfiguration);
+    }
+
+    /// <summary>
+    /// <c>write [memory]</c> at the exec prompt: changes exist only inside a configuration session.
+    /// </summary>
+    private static CliCommandResult ExecuteWriteOutsideConfiguration(string[] tokens)
+    {
+        if (tokens.Length > 1 &&
+            !"memory".StartsWith(tokens[1], StringComparison.OrdinalIgnoreCase))
+        {
+            return new CliCommandResult(CliCommandAction.Continue, "% Invalid input detected: use 'write' or 'write memory'.");
+        }
+
+        return new CliCommandResult(
+            CliCommandAction.Continue,
+            "% No unsaved configuration changes. Use 'configure terminal', make changes, then 'write' before 'end'.");
     }
 
     /// <summary>

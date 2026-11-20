@@ -23,7 +23,8 @@ namespace TechConnect.Server.Ssh.Cli;
 /// ShowVersion/ShowPrivilege/ShowClock/ShowTerminal/ShowUsers/ShowSessions/
 /// ShowSessionsDetail/ShowSession/ShowHistory/ShowDns/ShowIpInterfaces/ShowIpRoute/
 /// Nslookup/Connect/Attach/DisconnectSelf/Enable/Disable/Ping/Traceroute/Copy = 1;
-/// ShowSerial/Disconnect = 7; ShowHistorySession = 5; ShowHistoryUser = 11.
+/// ShowSerial/Disconnect = 7; ShowHistorySession = 5; ShowHistoryUser = 11;
+/// ConfigureTerminal/Write/ShowRunningConfig/ShowStartupConfig/ConfigurationCommand = 15.
 /// </remarks>
 internal enum CliCommandAction
 {
@@ -64,7 +65,10 @@ internal enum CliCommandAction
     Nslookup,
 
     /// <summary>Stream a file to an attached serial console.</summary>
-    Copy
+    Copy,
+
+    /// <summary>Enter configuration mode with a private candidate configuration (privilege 15).</summary>
+    EnterConfiguration
 }
 
 /// <summary>

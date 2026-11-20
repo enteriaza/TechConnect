@@ -151,6 +151,7 @@ TechConnect uses **only** DNS servers listed under `TechConnectServer:Dns` in `a
 
 - Empty `Servers` disables DNS. Literal IP destinations still work; hostname resolution and reverse DNS fail immediately with a clear error.
 - Invalid server addresses or timeout values fail startup validation.
+- A privilege-15 operator can change `Servers` and `QueryTimeoutSeconds` with `configure terminal` → `dns`; after `write` they apply at runtime (queries already in flight finish with their original settings).
 - `show dns` displays this TechConnect configuration (enabled state, ordered servers, timeout) — not the host OS DNS settings.
 - Queries are sent directly over UDP (with TCP fallback when the truncation flag is set). Supported types: **A**, **AAAA**, **PTR**.
 
@@ -349,6 +350,12 @@ This confirms TechConnect transport write completion, not device-level acceptanc
 | `show history user <username>` | 11 |
 | `show serial` | 7 |
 | `disconnect <session-id>` (admin) | 7 |
+| `configure` / `configure terminal` | 15 |
+| `write` / `write memory` | 15 |
+| `show running-config` / `show startup-config` | 15 |
+| Every configuration-mode line | 15 (re-checked per line) |
+
+Configuration mode (`TechConnect(config)#`), candidate/startup/running semantics, atomic `write`, runtime vs restart-required settings, and secret handling are documented in [configuration-cli.md](configuration-cli.md).
 
 ### `disconnect` forms
 
@@ -469,6 +476,8 @@ TechConnect.Server keeps a **bounded in-memory** application audit trail for NOC
 | `Enabled` | `true` | When `false`, writes are no-ops and `show history*` explains that auditing is disabled |
 | `MaximumEvents` | `10000` | Oldest events are evicted when capacity is exceeded; invalid values fail startup |
 
+Both settings can be changed by a privilege-15 operator with `configure terminal` → `audit` and take effect at runtime after `write` (disabling stops recording immediately; lowering `MaximumEvents` evicts the oldest events immediately). See [configuration-cli.md](configuration-cli.md).
+
 History is **discarded when the process restarts**. It is not a database, not exported, not tamper-proof, and not a compliance-certified audit archive.
 
 ### Event outcomes
@@ -484,7 +493,7 @@ Ordinary connector or SSH disconnects are informational, not failures. A success
 
 ### Event types (summary)
 
-Authentication (password / public-key / RADIUS / local fallback), authorization denials, connector register/reject/disconnect, operator attach/detach, automatic attachment release (SSH or connector disconnect), terminal enter/exit, and baud request start/success/failure/timeout.
+Authentication (password / public-key / RADIUS / local fallback), authorization denials, connector register/reject/disconnect, operator attach/detach, automatic attachment release (SSH or connector disconnect), terminal enter/exit, baud request start/success/failure/timeout, and configuration mode enter / write / write failure / discard (`config-enter`, `config-write`, `config-write-fail`, `config-discard`; operator and session only, never values).
 
 ### Deliberately excluded
 
@@ -498,7 +507,7 @@ Passwords and hashes, RADIUS shared secrets, private keys, authentication packet
 | Retention | In-memory, bounded, process lifetime | File/console per host logging config |
 | Audience | NOC via SSH CLI | Operators of the host / log pipeline |
 
-There are no CLI commands to delete, clear, or reconfigure audit history.
+There are no CLI commands to delete or clear audit history. Audit settings are changed only through configuration mode.
 
 ## Distinct states
 

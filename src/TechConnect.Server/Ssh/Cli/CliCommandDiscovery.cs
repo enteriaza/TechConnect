@@ -444,6 +444,14 @@ internal sealed class CliCommandDiscovery
 
                 yield break;
 
+            case CliArgumentKind.ConfigureMode:
+                yield return "terminal";
+                yield break;
+
+            case CliArgumentKind.WriteTarget:
+                yield return "memory";
+                yield break;
+
             case CliArgumentKind.CopySource:
                 foreach (var scheme in new[]
                          {

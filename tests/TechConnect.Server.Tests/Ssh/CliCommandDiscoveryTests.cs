@@ -56,10 +56,14 @@ public sealed class CliCommandDiscoveryTests
         var discovery = new CliCommandDiscovery();
         var result = discovery.Complete("show s", 6, Admin(), 80);
         result.Kind.Should().Be(CliDiscoveryKind.AmbiguousCompletion);
-        result.Tokens.Should().Equal("serial", "session", "sessions");
+        result.Tokens.Should().Equal("serial", "session", "sessions", "startup-config");
         result.DisplayText.Should().Contain("sessions");
         result.DisplayText.Should().NotContain("show sessions");
-        result.CompletionText.Should().Be("se");
+        result.CompletionText.Should().Be("s");
+
+        var narrowed = discovery.Complete("show se", 7, Admin(), 80);
+        narrowed.Tokens.Should().Equal("serial", "session", "sessions");
+        narrowed.CompletionText.Should().Be("se");
     }
 
     /// <summary>
@@ -251,8 +255,10 @@ public sealed class CliCommandDiscoveryTests
     public void Help_PartialCommandToken()
     {
         var discovery = new CliCommandDiscovery();
-        var result = discovery.Help("con", 3, Admin(), 80);
+        var result = discovery.Help("conn", 4, Admin(), 80);
         result.Tokens.Should().ContainSingle().Which.Should().Be("connect");
+        discovery.Help("con", 3, Admin(), 80).Tokens.Should().Equal("configure", "connect");
+        discovery.Help("con", 3, ReadOnly(), 80).Tokens.Should().ContainSingle().Which.Should().Be("connect");
     }
 
     /// <summary>
@@ -265,7 +271,7 @@ public sealed class CliCommandDiscoveryTests
         var admin = discovery.Help("", 0, Admin(), 80);
         admin.Kind.Should().Be(CliDiscoveryKind.ContextHelp);
         admin.Tokens.Should().Equal(
-            "attach", "clear", "connect", "copy", "disable", "disconnect", "enable", "exit", "help", "nslookup", "ping", "show", "traceroute");
+            "attach", "clear", "configure", "connect", "copy", "disable", "disconnect", "enable", "exit", "help", "nslookup", "ping", "show", "traceroute", "write");
         admin.Tokens.Should().NotContain(["set", "detach", "terminal"]);
 
         var level1 = discovery.Help("", 0, ReadOnly(), 80);
@@ -372,7 +378,7 @@ public sealed class CliCommandDiscoveryTests
         var discovery = new CliCommandDiscovery();
         var result = discovery.Complete("", 0, Admin(), 80);
         result.Tokens.Should().Equal(
-            "attach", "clear", "connect", "copy", "disable", "disconnect", "enable", "exit", "help", "nslookup", "ping", "show", "traceroute");
+            "attach", "clear", "configure", "connect", "copy", "disable", "disconnect", "enable", "exit", "help", "nslookup", "ping", "show", "traceroute", "write");
     }
 
     /// <summary>
@@ -537,9 +543,11 @@ public sealed class CliCommandDiscoveryTests
             "history",
             "ip",
             "privilege",
+            "running-config",
             "serial",
             "session",
             "sessions",
+            "startup-config",
             "terminal",
             "users",
             "version");

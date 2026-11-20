@@ -97,5 +97,20 @@ internal enum CliCommandId
     ShowIpRoute = 29,
 
     /// <summary>Privilege 1+: stream a remote/modem file to an attached serial console.</summary>
-    Copy = 30
+    Copy = 30,
+
+    /// <summary>Privilege 15: enter configuration mode (<c>configure [terminal]</c>).</summary>
+    ConfigureTerminal = 31,
+
+    /// <summary>Privilege 15: save the candidate configuration (<c>write [memory]</c>).</summary>
+    Write = 32,
+
+    /// <summary>Privilege 15: show the running configuration (secrets masked).</summary>
+    ShowRunningConfig = 33,
+
+    /// <summary>Privilege 15: show appsettings.json as startup configuration (secrets masked).</summary>
+    ShowStartupConfig = 34,
+
+    /// <summary>Privilege 15: any line executed inside configuration mode.</summary>
+    ConfigurationCommand = 35
 }

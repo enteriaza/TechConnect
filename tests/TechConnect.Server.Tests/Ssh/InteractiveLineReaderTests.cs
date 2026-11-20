@@ -306,16 +306,15 @@ public sealed class InteractiveLineReaderTests
             (line, cursor) => discovery.Help(line, cursor, Admin(), 80));
 
         var readTask = reader.ReadLineAsync(CancellationToken.None);
-        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("show s"));
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("show ses"));
         await pipe.Client.WriteAsync(new byte[] { 0x09 });
         await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("\r"));
         var result = await readTask;
 
-        result.Text.Should().Be("show se");
+        result.Text.Should().Be("show session");
         var text = output.ToString();
         text.Should().Contain("sessions");
         text.Should().Contain("session");
-        text.Should().Contain("serial");
     }
 
     /// <summary>

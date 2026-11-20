@@ -39,5 +39,11 @@ internal enum CliArgumentKind
     CopySource = 8,
 
     /// <summary>Copy destination <c>serial:&lt;session-id&gt;</c>.</summary>
-    CopyDestination = 9
+    CopyDestination = 9,
+
+    /// <summary>Configuration source for <c>configure</c> (only <c>terminal</c> is supported).</summary>
+    ConfigureMode = 10,
+
+    /// <summary>Write target for <c>write</c> (only <c>memory</c> is supported).</summary>
+    WriteTarget = 11
 }

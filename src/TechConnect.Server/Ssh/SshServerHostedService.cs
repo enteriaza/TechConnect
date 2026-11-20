@@ -25,6 +25,7 @@ using TechConnect.Server.Authentication.Local;
 using TechConnect.Server.Authentication.Models;
 using TechConnect.Server.Authorization;
 using TechConnect.Server.Configuration;
+using TechConnect.Server.Configuration.Management;
 using TechConnect.Server.Connector;
 using TechConnect.Server.Copy;
 using TechConnect.Server.Diagnostics;
@@ -149,6 +150,9 @@ internal sealed class SshServerHostedService : BackgroundService
     /// <summary>Registry of in-flight copy operations.</summary>
     private readonly ActiveCopyRegistry _activeCopies;
 
+    /// <summary>Configuration management for configuration mode (null when not provided).</summary>
+    private readonly ConfigurationManagementService? _configurationManagement;
+
     /// <summary>Active DevTunnels SSH server instance, if running.</summary>
     private SshServer? _server;
 
@@ -197,6 +201,7 @@ internal sealed class SshServerHostedService : BackgroundService
     /// <param name="copyTransfer">Optional copy transfer service.</param>
     /// <param name="activeCopies">Optional active copy registry.</param>
     /// <param name="pendingBaudRequests">Pending baud request tracker.</param>
+    /// <param name="configurationManagement">Optional configuration management (enables configuration mode).</param>
     /// <exception cref="ArgumentNullException">A required dependency is <see langword="null"/>.</exception>
     public SshServerHostedService(
         IOptions<TechConnectServerOptions> options,
@@ -224,9 +229,11 @@ internal sealed class SshServerHostedService : BackgroundService
         IDestinationResolver? destinationResolver = null,
         ICopyFileSourceFactory? copySources = null,
         CopyTransferService? copyTransfer = null,
-        ActiveCopyRegistry? activeCopies = null)
+        ActiveCopyRegistry? activeCopies = null,
+        ConfigurationManagementService? configurationManagement = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _configurationManagement = configurationManagement;
         _hostKeyProvider = hostKeyProvider ?? throw new ArgumentNullException(nameof(hostKeyProvider));
         _authentication = authentication ?? throw new ArgumentNullException(nameof(authentication));
         _cliDispatcher = cliDispatcher ?? throw new ArgumentNullException(nameof(cliDispatcher));
@@ -774,7 +781,8 @@ internal sealed class SshServerHostedService : BackgroundService
                 _copySources,
                 _copyTransfer,
                 _activeCopies,
-                _loggerFactory);
+                _loggerFactory,
+                _configurationManagement);
             await session.RunAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

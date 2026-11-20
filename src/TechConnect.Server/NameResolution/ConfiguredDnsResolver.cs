@@ -33,11 +33,11 @@ namespace TechConnect.Server.NameResolution;
 /// </remarks>
 internal sealed class ConfiguredDnsResolver : IDnsResolver
 {
-    /// <summary>Configured server addresses in configuration order.</summary>
-    private readonly IReadOnlyList<IPAddress> _servers;
-
-    /// <summary>Per-server query timeout.</summary>
-    private readonly TimeSpan _timeout;
+    /// <summary>
+    /// Configured servers (in configuration order) and per-server timeout, swapped as one
+    /// immutable snapshot by <see cref="ApplyOptions"/>; in-flight queries keep their snapshot.
+    /// </summary>
+    private volatile ResolverSettings _settings;
 
     /// <summary>DNS server port (53 in production; overridable for tests).</summary>
     private readonly int _port;
@@ -57,9 +57,7 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
     {
         ArgumentNullException.ThrowIfNull(options);
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        var dns = options.Value.Dns ?? new DnsOptions();
-        _timeout = TimeSpan.FromSeconds(Math.Clamp(dns.QueryTimeoutSeconds, 1, 60));
-        _servers = ParseServers(dns.Servers);
+        _settings = CreateSettings(options.Value.Dns ?? new DnsOptions());
         _port = 53;
     }
 
@@ -76,8 +74,8 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
         ILogger<ConfiguredDnsResolver> logger,
         int port = 53)
     {
-        _servers = servers ?? throw new ArgumentNullException(nameof(servers));
-        _timeout = timeout <= TimeSpan.Zero ? TimeSpan.FromSeconds(3) : timeout;
+        ArgumentNullException.ThrowIfNull(servers);
+        _settings = new ResolverSettings(servers, timeout <= TimeSpan.Zero ? TimeSpan.FromSeconds(3) : timeout);
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         if (port is < 1 or > 65535)
         {
@@ -88,13 +86,37 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
     }
 
     /// <inheritdoc />
-    public bool IsEnabled => _servers.Count > 0;
+    public bool IsEnabled => _settings.Servers.Count > 0;
 
     /// <inheritdoc />
-    public IReadOnlyList<IPAddress> ConfiguredServers => _servers;
+    public IReadOnlyList<IPAddress> ConfiguredServers => _settings.Servers;
 
     /// <inheritdoc />
-    public TimeSpan QueryTimeout => _timeout;
+    public TimeSpan QueryTimeout => _settings.Timeout;
+
+    /// <summary>
+    /// Replaces the configured servers and query timeout for subsequent queries.
+    /// </summary>
+    /// <remarks>
+    /// Called only after a validated configuration has been persisted. Queries already in
+    /// progress complete against the snapshot they started with.
+    /// </remarks>
+    /// <param name="dns">Validated DNS options.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="dns"/> is null.</exception>
+    public void ApplyOptions(DnsOptions dns)
+    {
+        ArgumentNullException.ThrowIfNull(dns);
+        _settings = CreateSettings(dns);
+    }
+
+    /// <summary>Builds an immutable settings snapshot from DNS options.</summary>
+    private static ResolverSettings CreateSettings(DnsOptions dns) =>
+        new(ParseServers(dns.Servers ?? []), TimeSpan.FromSeconds(Math.Clamp(dns.QueryTimeoutSeconds, 1, 60)));
+
+    /// <summary>Immutable resolver settings snapshot.</summary>
+    /// <param name="Servers">Server addresses in configuration order.</param>
+    /// <param name="Timeout">Per-server query timeout.</param>
+    private sealed record ResolverSettings(IReadOnlyList<IPAddress> Servers, TimeSpan Timeout);
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<IPAddress>> ResolveAsync(
@@ -153,14 +175,15 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
         var sw = Stopwatch.StartNew();
         var queryName = DnsWireCodec.NormalizeName(name);
 
-        if (_servers.Count == 0)
+        var settings = _settings;
+        if (settings.Servers.Count == 0)
         {
             return Disabled(queryName, type, sw.Elapsed);
         }
 
         DnsQueryResult? lastTransient = null;
 
-        foreach (var server in _servers)
+        foreach (var server in settings.Servers)
         {
             if (cancellationToken.IsCancellationRequested)
             {
@@ -178,7 +201,7 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
 
             try
             {
-                var result = await QueryServerAsync(server, queryName, type, cancellationToken)
+                var result = await QueryServerAsync(server, queryName, type, settings.Timeout, cancellationToken)
                     .ConfigureAwait(false);
                 result = result with { Duration = sw.Elapsed };
 
@@ -260,12 +283,14 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
     /// <param name="server">DNS server address.</param>
     /// <param name="queryName">Normalized query name.</param>
     /// <param name="type">Record type.</param>
+    /// <param name="timeout">Per-server timeout from the query's settings snapshot.</param>
     /// <param name="cancellationToken">Caller cancellation; linked with per-query timeout.</param>
     /// <returns>Query result for this server attempt.</returns>
     private async Task<DnsQueryResult> QueryServerAsync(
         IPAddress server,
         string queryName,
         DnsRecordType type,
+        TimeSpan timeout,
         CancellationToken cancellationToken)
     {
         var transactionId = (ushort)Random.Shared.Next(0, ushort.MaxValue + 1);
@@ -280,7 +305,7 @@ internal sealed class ConfiguredDnsResolver : IDnsResolver
         }
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(_timeout);
+        timeoutCts.CancelAfter(timeout);
 
         byte[] responseBytes;
         try

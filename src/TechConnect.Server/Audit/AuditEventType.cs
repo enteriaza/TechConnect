@@ -122,7 +122,19 @@ internal enum AuditEventType
     DisableToLevel1 = 34,
 
     /// <summary>Enable authorization denied (requested privilege exceeds authorized).</summary>
-    EnableAuthorizationDenied = 35
+    EnableAuthorizationDenied = 35,
+
+    /// <summary>Operator entered configuration mode.</summary>
+    ConfigurationModeEntered = 36,
+
+    /// <summary>Candidate configuration written to startup-config (appsettings.json).</summary>
+    ConfigurationSaved = 37,
+
+    /// <summary>Configuration write refused or failed (validation, conflict, or I/O).</summary>
+    ConfigurationSaveFailed = 38,
+
+    /// <summary>Unsaved candidate configuration changes discarded.</summary>
+    ConfigurationDiscarded = 39
 }
 
 /// <summary>

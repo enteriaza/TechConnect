@@ -17,6 +17,10 @@ set DOTNET_ENVIRONMENT=Development
 dotnet TechConnect.Server.dll
 ```
 
+### Changing settings from the SSH CLI
+
+Privilege-15 operators can edit settings with `configure terminal` and save them to this server's `appsettings.json` (content root) with `write`. Changes are validated and written atomically; audit and DNS settings and Serilog levels apply immediately, everything else is reported as requiring a restart (the server never restarts itself). `write` persists only the settings the operator changed; values supplied by `appsettings.{Environment}.json` or environment variables (including secrets) are never copied into `appsettings.json`. See [docs/TechConnect/configuration-cli.md](../../docs/TechConnect/configuration-cli.md).
+
 ### SSH settings
 
 ```json

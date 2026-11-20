@@ -22,6 +22,7 @@ using TechConnect.Server.Authentication.Radius;
 using TechConnect.Server.Authorization;
 using TechConnect.Server.Certificates;
 using TechConnect.Server.Configuration;
+using TechConnect.Server.Configuration.Management;
 using TechConnect.Server.Connector;
 using TechConnect.Server.Copy;
 using TechConnect.Server.Diagnostics;
@@ -118,7 +119,9 @@ public static class HostingExtensions
         services.AddSingleton<PendingSessionPingTracker>();
         services.AddSingleton<IIPv6NetworkAvailability, SystemIPv6NetworkAvailability>();
         services.AddSingleton<IIcmpEchoClient, RawSocketIcmpEchoClient>();
-        services.AddSingleton<TechConnect.Server.NameResolution.IDnsResolver, TechConnect.Server.NameResolution.ConfiguredDnsResolver>();
+        services.AddSingleton<TechConnect.Server.NameResolution.ConfiguredDnsResolver>();
+        services.AddSingleton<TechConnect.Server.NameResolution.IDnsResolver>(
+            sp => sp.GetRequiredService<TechConnect.Server.NameResolution.ConfiguredDnsResolver>());
         services.AddSingleton<IDestinationResolver, DestinationResolver>();
         services.AddSingleton<IIcmpTracerouteClient, RawSocketIcmpTracerouteClient>();
         services.AddSingleton<ConnectorDisconnectService>();
@@ -146,6 +149,17 @@ public static class HostingExtensions
         services.AddSingleton<CopyTransferService>();
         services.AddSingleton<ICopyFileSourceFactory>(sp =>
             new CopyFileSourceFactory(sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>()));
+
+        // Configuration CLI. Resolved by SshServerHostedService at startup so the running
+        // snapshot reflects the configuration the services were built from.
+        services.AddSingleton<IConfigurationFileStore, AppsettingsConfigurationFileStore>();
+        services.AddSingleton(sp => new ConfigurationManagementService(
+            sp.GetRequiredService<IConfiguration>(),
+            sp.GetRequiredService<IConfigurationFileStore>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ConfigurationManagementService>>(),
+            sp.GetRequiredService<TechConnect.Server.NameResolution.ConfiguredDnsResolver>(),
+            sp.GetRequiredService<InMemoryAuditEventStore>(),
+            sp.GetRequiredService<IAuditEventWriter>()));
 
         // Independent listeners — either may fail without stopping the other.
         services.AddHostedService<SshServerHostedService>();

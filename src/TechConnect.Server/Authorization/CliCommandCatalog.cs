@@ -78,6 +78,20 @@ internal static class CliCommandCatalog
         "Destination connector session matching your attachment",
         CliArgumentKind.CopyDestination);
 
+    /// <summary>Optional configuration source for <c>configure</c>.</summary>
+    internal static readonly CliArgumentSpec ConfigureModeArgument = new(
+        "terminal",
+        "Configure from the terminal (default)",
+        CliArgumentKind.ConfigureMode,
+        optional: true);
+
+    /// <summary>Optional write target for <c>write</c>.</summary>
+    internal static readonly CliArgumentSpec WriteTargetArgument = new(
+        "memory",
+        "Write to startup-config (appsettings.json)",
+        CliArgumentKind.WriteTarget,
+        optional: true);
+
     /// <summary>
     /// Root-level catalog nodes for the TechConnect CLI.
     /// </summary>
@@ -175,6 +189,14 @@ internal static class CliCommandCatalog
                     "Show DNS resolvers configured on this server",
                     CliCommandId.ShowDns),
                 new CliCommandNode(
+                    "running-config",
+                    "Show the configuration in use (secrets masked)",
+                    CliCommandId.ShowRunningConfig),
+                new CliCommandNode(
+                    "startup-config",
+                    "Show appsettings.json configuration (secrets masked)",
+                    CliCommandId.ShowStartupConfig),
+                new CliCommandNode(
                     "ip",
                     "Show this server's IP configuration",
                     children:
@@ -227,6 +249,18 @@ internal static class CliCommandCatalog
             "disable",
             "Return to privilege level 1",
             CliCommandId.Disable),
+        new CliCommandNode(
+            "configure",
+            "Enter configuration mode",
+            CliCommandId.ConfigureTerminal,
+            argument: ConfigureModeArgument,
+            aliases: ["conf", "config"]),
+        new CliCommandNode(
+            "write",
+            "Save configuration changes (from configuration mode)",
+            CliCommandId.Write,
+            argument: WriteTargetArgument,
+            aliases: ["wr"]),
         new CliCommandNode(
             "disconnect",
             "Release your attachment, or administratively disconnect a connector session",

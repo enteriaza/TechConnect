@@ -195,6 +195,10 @@ internal static class AuditHistoryFormatter
         AuditEventType.PrivilegeChanged => "priv-changed",
         AuditEventType.DisableToLevel1 => "disable-1",
         AuditEventType.EnableAuthorizationDenied => "enable-authz-deny",
+        AuditEventType.ConfigurationModeEntered => "config-enter",
+        AuditEventType.ConfigurationSaved => "config-write",
+        AuditEventType.ConfigurationSaveFailed => "config-write-fail",
+        AuditEventType.ConfigurationDiscarded => "config-discard",
         // cleanup-incomplete is recorded as AdministrativeDisconnectFailed with reason detail
         _ => type.ToString()
     };

@@ -396,6 +396,17 @@ internal sealed class InteractiveLineReader
     }
 
     /// <summary>
+    /// Drops the most recent history entry (the last line may have contained secret material).
+    /// </summary>
+    public void ForgetLastHistoryEntry()
+    {
+        if (_history.Count > 0)
+        {
+            _history.RemoveAt(_history.Count - 1);
+        }
+    }
+
+    /// <summary>
     /// Adds a non-empty line to history (bounded by max history).
     /// </summary>
     private void Remember(string line)

@@ -19,6 +19,7 @@ using TechConnect.Server.Audit;
 using TechConnect.Server.Authentication;
 using TechConnect.Server.Authentication.Models;
 using TechConnect.Server.Authorization;
+using TechConnect.Server.Configuration.Management;
 using TechConnect.Server.Connector;
 using TechConnect.Server.Copy;
 using TechConnect.Server.Diagnostics;
@@ -157,6 +158,15 @@ internal sealed class TechConnectCliSession
     /// <summary>Temporary prompt override (for example enable password prompt).</summary>
     private string? _linePromptOverride;
 
+    /// <summary>Configuration management (null when the host does not provide it).</summary>
+    private readonly ConfigurationManagementService? _configurationManagement;
+
+    /// <summary>Configuration-mode interpreter (null when management is unavailable).</summary>
+    private readonly ConfigurationModeProcessor? _configurationProcessor;
+
+    /// <summary>Active private configuration session; null outside configuration mode.</summary>
+    private ConfigurationEditSession? _configurationEdit;
+
     /// <summary>
     /// Initializes a CLI session over an SSH shell channel stream.
     /// </summary>
@@ -187,6 +197,7 @@ internal sealed class TechConnectCliSession
     /// <param name="copyTransfer">Optional copy transfer service.</param>
     /// <param name="activeCopies">Optional active copy registry.</param>
     /// <param name="loggerFactory">Optional logger factory.</param>
+    /// <param name="configurationManagement">Optional configuration management (enables configuration mode).</param>
     /// <exception cref="ArgumentNullException">A required dependency is <see langword="null"/>.</exception>
     public TechConnectCliSession(
         Stream stream,
@@ -215,7 +226,8 @@ internal sealed class TechConnectCliSession
         ICopyFileSourceFactory? copySources = null,
         CopyTransferService? copyTransfer = null,
         ActiveCopyRegistry? activeCopies = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        ConfigurationManagementService? configurationManagement = null)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
@@ -256,7 +268,14 @@ internal sealed class TechConnectCliSession
         _operatorSessionId = _operator.OperatorSessionId;
         _terminal = terminal ?? new SshTerminalInfo(null, SshTerminalInfo.DefaultColumns, SshTerminalInfo.DefaultRows);
         _discovery = new CliCommandDiscovery(_sessionRegistry, _ipv6Availability);
+        _configurationManagement = configurationManagement;
+        _configurationProcessor = configurationManagement is null
+            ? null
+            : new ConfigurationModeProcessor(configurationManagement, _authorization);
     }
+
+    /// <summary>Whether the session is in configuration mode.</summary>
+    public bool IsInConfigurationMode => _configurationEdit is not null;
 
     /// <summary>
     /// Operator session identifier for this CLI session.
@@ -279,7 +298,10 @@ internal sealed class TechConnectCliSession
     /// Returns the privilege-dependent CLI prompt string.
     /// </summary>
     /// <returns>Operator or administrator prompt.</returns>
-    private string GetPrompt() => TechConnectCliDispatcher.GetPrompt(_activePrivilege);
+    private string GetPrompt() =>
+        _configurationEdit is { } edit
+            ? ConfigurationModeProcessor.GetPrompt(edit)
+            : TechConnectCliDispatcher.GetPrompt(_activePrivilege);
 
     /// <summary>
     /// Runs the CLI read/dispatch loop until exit, channel close, or cancellation.
@@ -296,8 +318,12 @@ internal sealed class TechConnectCliSession
             _stream,
             WriteRawValueAsync,
             () => _linePromptOverride ?? GetPrompt(),
-            (line, cursor) => _discovery.Complete(line, cursor, ActiveIdentity, _terminal.Columns),
-            (line, cursor) => _discovery.Help(line, cursor, ActiveIdentity, _terminal.Columns),
+            (line, cursor) => _configurationEdit is { } edit
+                ? _configurationProcessor!.Complete(edit, line, cursor, _terminal.Columns)
+                : _discovery.Complete(line, cursor, ActiveIdentity, _terminal.Columns),
+            (line, cursor) => _configurationEdit is { } edit
+                ? _configurationProcessor!.Help(edit, line, cursor, _terminal.Columns)
+                : _discovery.Help(line, cursor, ActiveIdentity, _terminal.Columns),
             () => _terminal.Columns);
 
         var cliRecord = new OperatorCliSessionRecord
@@ -368,6 +394,13 @@ internal sealed class TechConnectCliSession
                 }
 
                 SyncCliPresence();
+                if (_configurationEdit is { } activeEdit)
+                {
+                    await ExecuteConfigurationLineAsync(activeEdit, read.Text, cancellationToken).ConfigureAwait(false);
+                    await WritePromptAsync(cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 var result = _dispatcher.Execute(
                     input: read.Text,
                     loginIdentity: _operator,
@@ -456,6 +489,13 @@ internal sealed class TechConnectCliSession
                     continue;
                 }
 
+                if (result.Action == CliCommandAction.EnterConfiguration)
+                {
+                    await EnterConfigurationAsync(cancellationToken).ConfigureAwait(false);
+                    await WritePromptAsync(cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
                 if (!string.IsNullOrEmpty(result.Output))
                 {
                     await WriteTextAsync(result.Output + "\r\n", cancellationToken).ConfigureAwait(false);
@@ -472,6 +512,19 @@ internal sealed class TechConnectCliSession
         }
         finally
         {
+            if (_configurationEdit is { } abandoned)
+            {
+                _configurationEdit = null;
+                try
+                {
+                    _configurationManagement!.Discard(abandoned, "session ended");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Configuration discard on session end failed for {Operator}", _operatorIdentity);
+                }
+            }
+
             _operatorSessions.UnregisterCliSession(_operatorSessionId);
             _pendingBaudRequests.FailOperator(
                 _operatorSessionId,
@@ -928,6 +981,106 @@ internal sealed class TechConnectCliSession
             _logger.LogDebug(ex, "nslookup failed for {Hostname}", hostname);
             await WriteTextAsync("% DNS lookup failed: " + ex.Message + "\r\n", cancellationToken)
                 .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Enters configuration mode with a private candidate copied from the effective configuration.
+    /// </summary>
+    private async Task EnterConfigurationAsync(CancellationToken cancellationToken)
+    {
+        if (_configurationManagement is null)
+        {
+            await WriteTextAsync(TechConnectCliDispatcher.ConfigurationUnavailableMessage + "\r\n", cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        var edit = _configurationManagement.BeginEdit(ActiveIdentity, out var notes);
+        _configurationEdit = edit;
+        var text = new StringBuilder(ConfigurationModeProcessor.EntryMessage).Append("\r\n");
+        foreach (var note in notes)
+        {
+            text.Append(note).Append("\r\n");
+        }
+
+        await WriteTextAsync(text.ToString(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Executes one configuration-mode line (privilege is re-checked by the processor).
+    /// </summary>
+    private async Task ExecuteConfigurationLineAsync(
+        ConfigurationEditSession edit,
+        string text,
+        CancellationToken cancellationToken)
+    {
+        var result = _configurationProcessor!.Execute(edit, ActiveIdentity, text);
+        if (result.ForgetHistory)
+        {
+            _lineReader?.ForgetLastHistoryEntry();
+        }
+
+        if (!string.IsNullOrEmpty(result.Output))
+        {
+            await WriteTextAsync(result.Output + "\r\n", cancellationToken).ConfigureAwait(false);
+        }
+
+        switch (result.Action)
+        {
+            case ConfigurationLineAction.Leave:
+                await LeaveConfigurationAsync(edit, "end", cancellationToken).ConfigureAwait(false);
+                break;
+            case ConfigurationLineAction.PromptSecret when result.Secret is { } request:
+                await PromptConfigurationSecretAsync(request, cancellationToken).ConfigureAwait(false);
+                break;
+            case ConfigurationLineAction.Write:
+                var written = await _configurationManagement!.WriteAsync(edit, cancellationToken).ConfigureAwait(false);
+                await WriteTextAsync(ConfigurationModeProcessor.FormatWriteResult(written) + "\r\n", cancellationToken)
+                    .ConfigureAwait(false);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Leaves configuration mode, discarding unsaved changes with a warning.
+    /// </summary>
+    private async Task LeaveConfigurationAsync(ConfigurationEditSession edit, string reason, CancellationToken cancellationToken)
+    {
+        _configurationEdit = null;
+        var discarded = _configurationManagement!.Discard(edit, reason);
+        if (discarded > 0)
+        {
+            await WriteTextAsync(ConfigurationModeProcessor.DiscardedMessage + "\r\n", cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Reads a secret twice with hidden input and applies it to the candidate.
+    /// </summary>
+    private async Task PromptConfigurationSecretAsync(ConfigurationSecretRequest request, CancellationToken cancellationToken)
+    {
+        await WriteTextAsync(request.Prompt, cancellationToken).ConfigureAwait(false);
+        var first = await _lineReader!.ReadSecretLineAsync(cancellationToken).ConfigureAwait(false);
+        if (first.Outcome != LineReadOutcome.Line)
+        {
+            await WriteTextAsync("% Cancelled. Value not changed.\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await WriteTextAsync(request.ConfirmPrompt, cancellationToken).ConfigureAwait(false);
+        var second = await _lineReader.ReadSecretLineAsync(cancellationToken).ConfigureAwait(false);
+        if (second.Outcome != LineReadOutcome.Line)
+        {
+            await WriteTextAsync("% Cancelled. Value not changed.\r\n", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var error = _configurationProcessor!.ApplySecret(request, first.Text, second.Text);
+        if (error is not null)
+        {
+            await WriteTextAsync(error + "\r\n", cancellationToken).ConfigureAwait(false);
         }
     }
 

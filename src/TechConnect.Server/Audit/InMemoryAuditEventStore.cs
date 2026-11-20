@@ -50,11 +50,14 @@ internal sealed class InMemoryAuditEventStore : IAuditEventWriter, IAuditEventRe
     /// <summary>Logger for non-throwing write failures.</summary>
     private readonly ILogger<InMemoryAuditEventStore> _logger;
 
-    /// <summary>When false, writes are no-ops and queries return empty.</summary>
-    private readonly bool _enabled;
+    /// <summary>Optional test hook run after the unlocked enabled check and before taking <c>_gate</c>.</summary>
+    private readonly Action? _beforeWriteLock;
 
-    /// <summary>Maximum retained events; oldest are removed when exceeded.</summary>
-    private readonly int _maximumEvents;
+    /// <summary>When false, writes are no-ops and queries return empty.</summary>
+    private volatile bool _enabled;
+
+    /// <summary>Maximum retained events; oldest are removed when exceeded. Changed only under <c>_gate</c>.</summary>
+    private volatile int _maximumEvents;
 
     /// <summary>Next monotonic sequence number assigned under <c>_gate</c>.</summary>
     private long _nextSequence = 1;
@@ -84,11 +87,17 @@ internal sealed class InMemoryAuditEventStore : IAuditEventWriter, IAuditEventRe
     }
 
     /// <summary>Test constructor with explicit capacity.</summary>
+    /// <param name="enabled">Initial enabled flag.</param>
+    /// <param name="maximumEvents">Initial capacity.</param>
+    /// <param name="timeProvider">Clock for event timestamps.</param>
+    /// <param name="logger">Logger for write failures.</param>
+    /// <param name="beforeWriteLock">Optional hook run between the unlocked enabled check and the lock (tests order races).</param>
     internal InMemoryAuditEventStore(
         bool enabled,
         int maximumEvents,
         TimeProvider timeProvider,
-        ILogger<InMemoryAuditEventStore> logger)
+        ILogger<InMemoryAuditEventStore> logger,
+        Action? beforeWriteLock = null)
     {
         if (maximumEvents < 1)
         {
@@ -99,6 +108,7 @@ internal sealed class InMemoryAuditEventStore : IAuditEventWriter, IAuditEventRe
         _maximumEvents = maximumEvents;
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _beforeWriteLock = beforeWriteLock;
         _events = new List<AuditEvent>(Math.Min(maximumEvents, 256));
     }
 
@@ -143,6 +153,38 @@ internal sealed class InMemoryAuditEventStore : IAuditEventWriter, IAuditEventRe
     public int MaximumEvents => _maximumEvents;
 
     /// <summary>
+    /// Applies a validated audit enablement flag and retention limit to the running store.
+    /// </summary>
+    /// <remarks>
+    /// Called only after a validated configuration has been persisted. Shrinking the limit
+    /// evicts the oldest retained events immediately; disabling stops recording but keeps
+    /// already-retained events in memory (hidden while disabled).
+    /// </remarks>
+    /// <param name="audit">Validated audit options.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="audit"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><see cref="AuditOptions.MaximumEvents"/> is less than 1.</exception>
+    public void ApplyOptions(AuditOptions audit)
+    {
+        ArgumentNullException.ThrowIfNull(audit);
+        if (audit.MaximumEvents < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(audit));
+        }
+
+        lock (_gate)
+        {
+            _maximumEvents = audit.MaximumEvents;
+            if (_events.Count > _maximumEvents)
+            {
+                _events.RemoveRange(0, _events.Count - _maximumEvents);
+                _hasEvicted = true;
+            }
+
+            _enabled = audit.Enabled;
+        }
+    }
+
+    /// <summary>
     /// Appends a sanitized audit event when enabled; never throws for ordinary failures.
     /// </summary>
     /// <param name="type">Event type classification.</param>
@@ -162,8 +204,14 @@ internal sealed class InMemoryAuditEventStore : IAuditEventWriter, IAuditEventRe
 
         try
         {
+            _beforeWriteLock?.Invoke();
             lock (_gate)
             {
+                if (!_enabled)
+                {
+                    return;
+                }
+
                 var evt = new AuditEvent
                 {
                     Sequence = _nextSequence++,

@@ -50,7 +50,12 @@ internal static class CliCommandPolicy
             [CliCommandId.Disable] = PrivilegeLevel.FromInt(1),
             [CliCommandId.Ping] = PrivilegeLevel.FromInt(1),
             [CliCommandId.Traceroute] = PrivilegeLevel.FromInt(1),
-            [CliCommandId.Copy] = PrivilegeLevel.FromInt(1)
+            [CliCommandId.Copy] = PrivilegeLevel.FromInt(1),
+            [CliCommandId.ConfigureTerminal] = PrivilegeLevel.FromInt(15),
+            [CliCommandId.Write] = PrivilegeLevel.FromInt(15),
+            [CliCommandId.ShowRunningConfig] = PrivilegeLevel.FromInt(15),
+            [CliCommandId.ShowStartupConfig] = PrivilegeLevel.FromInt(15),
+            [CliCommandId.ConfigurationCommand] = PrivilegeLevel.FromInt(15)
         };
 
     /// <summary>
@@ -278,6 +283,11 @@ internal static class CliCommandPolicy
         CliCommandId.Ping => "ping",
         CliCommandId.Traceroute => "traceroute",
         CliCommandId.Copy => "copy",
+        CliCommandId.ConfigureTerminal => "configure terminal",
+        CliCommandId.Write => "write memory",
+        CliCommandId.ShowRunningConfig => "show running-config",
+        CliCommandId.ShowStartupConfig => "show startup-config",
+        CliCommandId.ConfigurationCommand => "configuration command",
         _ => command.ToString()
     };
 }

@@ -18,6 +18,7 @@ using TechConnect.Server.Authentication.Models;
 using TechConnect.Server.Authentication.Radius;
 using TechConnect.Server.Authorization;
 using TechConnect.Server.Configuration;
+using TechConnect.Server.Configuration.Management;
 using TechConnect.Server.Connector;
 using TechConnect.Server.Diagnostics;
 using TechConnect.Server.Inspection;
@@ -131,6 +132,7 @@ internal static class CliTestFactory
     /// <param name="routes">Optional routing inspector.</param>
     /// <param name="operatorSessions">Optional operator session tracker.</param>
     /// <param name="ipv6Availability">Optional IPv6 availability helper.</param>
+    /// <param name="configuration">Optional configuration management service.</param>
     /// <returns>Dispatcher and collaborating services.</returns>
     public static (
         TechConnectCliDispatcher Dispatcher,
@@ -150,7 +152,8 @@ internal static class CliTestFactory
         INetworkInterfaceInspector? interfaces = null,
         IRoutingTableInspector? routes = null,
         SshOperatorSessionTracker? operatorSessions = null,
-        IIPv6NetworkAvailability? ipv6Availability = null)
+        IIPv6NetworkAvailability? ipv6Availability = null,
+        ConfigurationManagementService? configuration = null)
     {
         audit ??= CreateAudit();
         timeProvider ??= TimeProvider.System;
@@ -175,7 +178,8 @@ internal static class CliTestFactory
             dnsConfiguration: dnsConfiguration,
             interfaces: interfaces,
             routes: routes,
-            operatorSessions: operatorSessions);
+            operatorSessions: operatorSessions,
+            configuration: configuration);
         return (dispatcher, registry, attachments, serialCache, pendingBaud, authorization, audit, tracker, disconnect, enable);
     }
 

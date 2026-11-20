@@ -202,8 +202,7 @@ public sealed class SshRemoteEndpointTests
                 lock (output)
                 {
                     output.Append(Encoding.UTF8.GetString(buf, 0, n));
-                }
-            }
+                }            }
         });
 
         var run = session.RunAsync(cts.Token);
@@ -217,8 +216,10 @@ public sealed class SshRemoteEndpointTests
 
         await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("show users\rexit\r"), cts.Token);
         await run.WaitAsync(TimeSpan.FromSeconds(10));
-        cts.Cancel();
-        try { await reader.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+
+        // EOF (not cancellation) ends the reader, so output the session already wrote is fully drained.
+        await pipe.DisposeAsync();
+        await reader.WaitAsync(TimeSpan.FromSeconds(10));
 
         string text;
         lock (output)

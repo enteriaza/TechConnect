@@ -121,6 +121,7 @@ Details: [docs/TechConnect/publish-release.md](docs/TechConnect/publish-release.
 | Binary protocol | [docs/TechConnect/protocol.md](docs/TechConnect/protocol.md) |
 | Protocol extensions | [docs/TechConnect/protocol-extensions.md](docs/TechConnect/protocol-extensions.md) |
 | SSH CLI | [docs/TechConnect/cli.md](docs/TechConnect/cli.md) |
+| Configuration CLI (`configure terminal`, `write`) | [docs/TechConnect/configuration-cli.md](docs/TechConnect/configuration-cli.md) |
 | Authentication | [docs/TechConnect/authentication.md](docs/TechConnect/authentication.md) |
 | NOC qualification checklist | [docs/TechConnect/noc-qualification.md](docs/TechConnect/noc-qualification.md) |
 | Release publishing | [docs/TechConnect/publish-release.md](docs/TechConnect/publish-release.md) |
