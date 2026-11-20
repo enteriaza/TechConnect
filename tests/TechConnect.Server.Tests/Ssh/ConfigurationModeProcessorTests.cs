@@ -120,7 +120,7 @@ public sealed class ConfigurationModeProcessorTests : IDisposable
         var result = Run(line);
 
         result.Action.Should().Be(ConfigurationLineAction.Continue);
-        result.Output.Should().StartWith("%").And.NotBeNull();
+        result.Output.Should().Contain("^\r\n% Invalid value");
         _edit.Candidate.ToJsonString().Should().Be(before);
     }
 

@@ -167,8 +167,12 @@ internal sealed class ConfigCollection
     /// <summary>CLI keyword that enters (or with <c>no</c>, removes) an entry.</summary>
     public required string Keyword { get; init; }
 
-    /// <summary>Prompt mode name, for example <c>config-user</c>.</summary>
-    public required string Mode { get; init; }
+    /// <summary>
+    /// Prompt mode name of the entry sub-mode, for example <c>config-user</c>; <see langword="null"/> when an entry
+    /// is configured entirely on one line in the parent context and has no sub-mode (its single setting is then
+    /// shown under the entry's own path, for example <c>enable-secret-level 5 &lt;hidden&gt;</c>).
+    /// </summary>
+    public string? Mode { get; init; }
 
     /// <summary>JSON array property name within the parent section object.</summary>
     public required string JsonName { get; init; }
@@ -301,7 +305,6 @@ internal static class ConfigurationSchema
         var enableLevel = new ConfigCollection
         {
             Keyword = "enable-secret-level",
-            Mode = "config-enable",
             JsonName = "EnableSecrets",
             KeyJsonName = "PrivilegeLevel",
             KeyKind = ConfigValueKind.PrivilegeLevel,

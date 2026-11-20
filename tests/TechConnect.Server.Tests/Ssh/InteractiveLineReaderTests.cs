@@ -418,6 +418,77 @@ public sealed class InteractiveLineReaderTests
     }
 
     /// <summary>
+    /// Home and End (CSI, VT, SS3, and Ctrl+A / Ctrl+E forms) move the cursor so text is inserted at the right place.
+    /// </summary>
+    [Theory]
+    [InlineData("\u001b[H", "\u001b[F")]
+    [InlineData("\u001b[1~", "\u001b[4~")]
+    [InlineData("\u001b[7~", "\u001b[8~")]
+    [InlineData("\u001bOH", "\u001bOF")]
+    [InlineData("\u0001", "\u0005")]
+    public async Task HomeAndEnd_MoveCursor(string home, string end)
+    {
+        await using var pipe = new DuplexMemoryPipe();
+        var output = new StringBuilder();
+        var reader = CreateReader(pipe.Server, output, "P>");
+
+        var readTask = reader.ReadLineAsync(CancellationToken.None);
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("bc" + home + "a" + end + "d\r"));
+
+        (await readTask).Text.Should().Be("abcd");
+    }
+
+    /// <summary>
+    /// Tab in the middle of a line completes the word at the cursor and keeps the rest of the line.
+    /// </summary>
+    [Fact]
+    public async Task Tab_MidLine_CompletesAtCursor_KeepsRest()
+    {
+        var discovery = new CliCommandDiscovery();
+        await using var pipe = new DuplexMemoryPipe();
+        var output = new StringBuilder();
+        var reader = CreateReader(
+            pipe.Server,
+            output,
+            "TechConnect#",
+            (line, cursor) => discovery.Complete(line, cursor, Admin(), 80),
+            (line, cursor) => discovery.Help(line, cursor, Admin(), 80));
+
+        var readTask = reader.ReadLineAsync(CancellationToken.None);
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("sh users\u001b[H\u001b[C\u001b[C\t\r"));
+
+        (await readTask).Text.Should().Be("show users");
+    }
+
+    /// <summary>
+    /// Hidden input is never echoed and never enters history; a forgotten line is not recalled.
+    /// </summary>
+    [Fact]
+    public async Task SecretInput_NotEchoed_NotInHistory_ForgottenLineNotRecalled()
+    {
+        await using var pipe = new DuplexMemoryPipe();
+        var output = new StringBuilder();
+        var reader = CreateReader(pipe.Server, output, "P>");
+
+        var first = reader.ReadLineAsync(CancellationToken.None);
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("show users\r"));
+        await first;
+        var secret = reader.ReadSecretLineAsync(CancellationToken.None);
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("Hidden-Pw-1\r"));
+        (await secret).Text.Should().Be("Hidden-Pw-1");
+        var inline = reader.ReadLineAsync(CancellationToken.None);
+        await pipe.Client.WriteAsync(Encoding.UTF8.GetBytes("password Inline-Pw-2\r"));
+        await inline;
+        reader.ForgetLastHistoryEntry();
+
+        output.ToString().Should().NotContain("Hidden-Pw-1");
+        reader.History.Should().Equal("show users");
+        var recalled = reader.ReadLineAsync(CancellationToken.None);
+        await pipe.Client.WriteAsync(new byte[] { 0x1B, (byte)'[', (byte)'A', (byte)'\r' });
+        (await recalled).Text.Should().Be("show users");
+    }
+
+    /// <summary>
     /// Verifies: Discovery Read Only Discloses Attach Not Removed Commands.
     /// </summary>
     [Fact]

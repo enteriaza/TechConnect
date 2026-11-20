@@ -302,6 +302,14 @@ internal sealed class InteractiveLineReader
 
                     continue;
 
+                case 0x01: // Ctrl+A — start of line
+                    cursor = await MoveCursorAsync(buffer, cursor, 0, cancellationToken).ConfigureAwait(false);
+                    continue;
+
+                case 0x05: // Ctrl+E — end of line
+                    cursor = await MoveCursorAsync(buffer, cursor, buffer.Length, cancellationToken).ConfigureAwait(false);
+                    continue;
+
                 case 0x15: // Ctrl+U
                     if (buffer.Length > 0)
                     {
@@ -479,7 +487,8 @@ internal sealed class InteractiveLineReader
             var start = Math.Clamp(result.ReplaceStart, 0, buffer.Length);
             var end = Math.Clamp(result.ReplaceEnd, start, buffer.Length);
             var completion = result.CompletionText;
-            if (result.AppendTrailingSpace)
+            var followedBySpace = end < buffer.Length && buffer[end] == ' ';
+            if (result.AppendTrailingSpace && !followedBySpace)
             {
                 completion += " ";
             }
@@ -493,7 +502,7 @@ internal sealed class InteractiveLineReader
 
             buffer.Remove(start, end - start);
             buffer.Insert(start, completion);
-            cursor = start + completion.Length;
+            cursor = start + completion.Length + (result.AppendTrailingSpace && followedBySpace ? 1 : 0);
             await RedrawAsync(buffer, cursor, cancellationToken).ConfigureAwait(false);
             return cursor;
         }
@@ -547,6 +556,22 @@ internal sealed class InteractiveLineReader
             return cursor;
         }
 
+        if (next.Value == (byte)'O')
+        {
+            // SS3 form sent by some terminals in application cursor mode.
+            var ss3 = await ReadByteAsync(cancellationToken).ConfigureAwait(false);
+            return ss3 switch
+            {
+                (byte)'H' => await MoveCursorAsync(buffer, cursor, 0, cancellationToken).ConfigureAwait(false),
+                (byte)'F' => await MoveCursorAsync(buffer, cursor, buffer.Length, cancellationToken).ConfigureAwait(false),
+                (byte)'C' => await MoveCursorAsync(buffer, cursor, cursor + 1, cancellationToken).ConfigureAwait(false),
+                (byte)'D' => await MoveCursorAsync(buffer, cursor, cursor - 1, cancellationToken).ConfigureAwait(false),
+                (byte)'A' => await HistoryUpAsync(buffer, cursor, cancellationToken).ConfigureAwait(false),
+                (byte)'B' => await HistoryDownAsync(buffer, cursor, cancellationToken).ConfigureAwait(false),
+                _ => cursor
+            };
+        }
+
         if (next.Value != (byte)'[')
         {
             return cursor;
@@ -589,11 +614,21 @@ internal sealed class InteractiveLineReader
                     }
 
                     return cursor;
+                case 'H':
+                    return await MoveCursorAsync(buffer, cursor, 0, cancellationToken).ConfigureAwait(false);
+                case 'F':
+                    return await MoveCursorAsync(buffer, cursor, buffer.Length, cancellationToken).ConfigureAwait(false);
                 case '~':
-                    if (param.ToString() == "3" && cursor < buffer.Length)
+                    switch (param.ToString())
                     {
-                        buffer.Remove(cursor, 1);
-                        await RedrawAsync(buffer, cursor, cancellationToken).ConfigureAwait(false);
+                        case "3" when cursor < buffer.Length:
+                            buffer.Remove(cursor, 1);
+                            await RedrawAsync(buffer, cursor, cancellationToken).ConfigureAwait(false);
+                            return cursor;
+                        case "1" or "7":
+                            return await MoveCursorAsync(buffer, cursor, 0, cancellationToken).ConfigureAwait(false);
+                        case "4" or "8":
+                            return await MoveCursorAsync(buffer, cursor, buffer.Length, cancellationToken).ConfigureAwait(false);
                     }
 
                     return cursor;
@@ -601,6 +636,20 @@ internal sealed class InteractiveLineReader
                     return cursor;
             }
         }
+    }
+
+    /// <summary>
+    /// Moves the edit cursor to <paramref name="target"/> (clamped to the line) and redraws when it moved.
+    /// </summary>
+    private async Task<int> MoveCursorAsync(StringBuilder buffer, int cursor, int target, CancellationToken cancellationToken)
+    {
+        target = Math.Clamp(target, 0, buffer.Length);
+        if (target != cursor)
+        {
+            await RedrawAsync(buffer, target, cancellationToken).ConfigureAwait(false);
+        }
+
+        return target;
     }
 
     /// <summary>

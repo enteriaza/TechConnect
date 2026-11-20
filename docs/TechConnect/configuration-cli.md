@@ -16,7 +16,12 @@ Every command below requires **active privilege 15** (`enable` first if you logg
 | Command (configuration mode) | Effect |
 |---|---|
 | `<section>` | Enter a sub-mode, for example `ssh` → `TechConnect(config-ssh)#`. Sub-modes: `ssh`, `authentication` → `local` / `radius` → `primary-server` / `secondary-server`, `audit`, `dns`, `connector` → `client-certificate-validation`, `logging` → `file`, `serilog`. |
-| `username <name>` / `enable-secret-level <1-15>` | (under `authentication local`) Create or edit a local account / per-level enable secret. `no username <name>` removes it. |
+| `username <name> privilege <1-15>` | (under `authentication local`) For a new account: prompts for the password (hidden, confirmed) and creates the account only once it is confirmed. For an existing account: changes its privilege level without a prompt. `username <new-name>` alone is `% Incomplete command.` |
+| `username <name> password` | Change an existing account's password at a hidden prompt. |
+| `username <name>` | Edit an existing account in `TechConnect(config-user)#` (`enabled`, `privilege-level`, `password`, `authorized-public-keys`). |
+| `enable-secret-level <1-15>` / `enable-secret-level <1-15> hash <hash>` | Create or replace a per-level enable secret (hidden prompt, or an existing Identity V3 hash). Configured on this one line in `(config-auth-local)`; there is no per-level sub-mode, and views show each level as `enable-secret-level <n> <hidden>`. |
+| `no username <name>` / `no enable-secret-level <1-15>` | Remove the account / per-level secret. |
+| `do show <command>` | Run a read-only EXEC `show` command from any configuration level, for example `do show running-config`, `do show startup-config`, `do show users`, `do show configuration changes`. Nothing but `show` is accepted (`do write`, `do configure`, `do enable`, `do copy` are rejected). EXEC `show` commands go through the normal EXEC authorization. |
 | `<setting> <value>` | Set a scalar. A bare boolean keyword sets it to `true`. |
 | `<list> add <v>` / `<list> remove <v>` / `<list> set <v> …` | Edit list settings (for example `dns` `servers add 192.0.2.53`). |
 | `<map> <source> <level>` / `no <map> [source]` | Serilog `minimum-level-override`. |
@@ -29,7 +34,19 @@ Every command below requires **active privilege 15** (`enable` first if you logg
 | `exit` | Leave the current sub-mode; at `(config)` leave configuration mode. |
 | `end` | Leave configuration mode from any sub-mode. |
 
-Keywords accept unique prefixes (an exact match wins). Errors follow IOS style: `% Invalid input detected at '^' marker.`, `% Incomplete command.`, `% Ambiguous command:  "…"`. Tab and `?` work in every sub-mode.
+Keywords accept unique prefixes (an exact match wins, so `enable-secret` is not ambiguous with `enable-secret-level`); values are never abbreviated or fuzzy-matched. Errors follow IOS style:
+
+| Error | Meaning |
+|---|---|
+| `% Incomplete command.` | A required keyword or argument is missing. |
+| caret line + `% Invalid input detected at '^' marker.` | Unknown keyword or unexpected extra input; the caret marks the first bad word. |
+| `% Ambiguous command:  "…"` | An abbreviation matches more than one keyword. |
+| caret line + `% Invalid value. …` | A well-formed command whose argument failed validation (range, format, username rules). |
+| `% Configuration validation failed.` | `validate` / `write` found the candidate as a whole invalid. |
+
+`?` lists what may come next at the cursor, with `<cr>` only when the line as typed would execute (for example `username admin ?` offers `privilege`, `password`, `<cr>`; `username newop ?` offers only `privilege`). Tab completes a unique keyword at the cursor, extends an ambiguous one to the common prefix and lists the choices. Neither `?` nor Tab executes or changes anything, and the typed line is kept.
+
+Line editing: Left/Right, Home/End (also Ctrl+A/Ctrl+E), Backspace, Delete, Ctrl+U (clear line), Up/Down (history). Hidden prompts and lines containing secret material never enter the history.
 
 ## Candidate, running, and startup
 
@@ -70,13 +87,13 @@ Unrelated JSON (unknown sections and unmanaged keys) is kept; comments are not. 
 
 | Setting | Stored as | Entry |
 |---|---|---|
-| `authentication local enable-secret`, `enable-secret-level <n> secret` | Identity V3 hash | Hidden prompt with confirmation, or `<kw> hash <identity-v3-hash>` |
-| `username <name> password` | Identity V3 hash (subject = username) | Hidden prompt with confirmation, or `password hash <hash>` |
+| `authentication local enable-secret`, `enable-secret-level <n>` | Identity V3 hash | Hidden prompt with confirmation, or `<kw> hash <identity-v3-hash>` |
+| `username <name> privilege <n>` (new account), `username <name> password` | Identity V3 hash (subject = username) | Hidden prompt with confirmation; `password hash <hash>` in `config-user` |
 | `radius primary-server shared-secret`, `secondary-server shared-secret` | Value (RADIUS needs it) | Hidden prompt with confirmation |
 | `ssh host-private-key` | PEM | `host-private-key generate` only |
 
-- Hidden input is never echoed, is not added to command history, and Ctrl+C at the prompt cancels (`% Cancelled. Value not changed.`).
-- A secret typed on the command line (`shared-secret abc`) is rejected and the line is removed from history.
+- Hidden input is never echoed, is not added to command history, and Ctrl+C at the prompt cancels (`% Cancelled. Value not changed.`, or `% Cancelled. 'username <name>' was not created.` for a new account).
+- A secret typed on the command line (`shared-secret abc`, `username admin password abc`, `username newop privilege 15 secret abc`, `enable-secret-level 5 abc`) is rejected, never echoed back, and the line is removed from history.
 - A secret supplied by an environment variable or `appsettings.{Environment}.json` is never written to `appsettings.json` by `write`, and never replaces a secret already in the file, unless the operator explicitly sets that secret.
 - Every view and diff **masks** secrets (`<hidden>` / `(not set)`; diffs `<set|changed|removed>`). Secrets are never written to logs, exception messages, or audit records.
 
@@ -96,7 +113,7 @@ All JSON paths are relative to `appsettings.json`. *Runtime* = applied after `wr
 | `authentication local public-key-authentication-enabled` | `…:Local:PublicKeyAuthenticationEnabled` | bool | true | Restart |
 | `authentication local enable-secret` | `…:Local:EnableSecretHash` | secret, Identity V3 hash | empty | Restart |
 | `authentication local username <n>` (`enabled`, `privilege-level`, `password`, `authorized-public-keys`) | `…:Local:LocalUsers[*]` | bool; 1–15; secret hash; OpenSSH key lines | enabled true, level 1 | Restart |
-| `authentication local enable-secret-level <n> secret` | `…:Local:EnableSecrets[*]:SecretHash` | secret, Identity V3 hash | — | Restart |
+| `authentication local enable-secret-level <n>` | `…:Local:EnableSecrets[*]:SecretHash` | secret, Identity V3 hash | — | Restart |
 | `authentication radius enabled` / `local-fallback-enabled` | `…:Radius:Enabled` / `LocalFallbackEnabled` | bool | false / false | Restart |
 | `authentication radius timeout-milliseconds` | `…:Radius:TimeoutMilliseconds` | int 100–120000 | 3000 | Restart |
 | `authentication radius max-attempts` | `…:Radius:MaxAttempts` | int 1–5 | 2 | Restart |

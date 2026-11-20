@@ -627,7 +627,7 @@ internal static partial class ConfigurationModel
                     var itemPath = Join(prefix, collection.Keyword + " " + AsString(item[collection.KeyJsonName]));
                     foreach (var setting in collection.Settings)
                     {
-                        yield return (Join(itemPath, setting.Keyword), setting, GetValue(item, setting));
+                        yield return (EntrySettingPath(itemPath, collection, setting), setting, GetValue(item, setting));
                     }
                 }
             }
@@ -678,10 +678,14 @@ internal static partial class ConfigurationModel
                 {
                     var key = AsString(item[collection.KeyJsonName]) ?? string.Empty;
                     var itemPath = Join(prefix, collection.Keyword + " " + key);
-                    entries[itemPath] = new ConfigEntry(itemPath, "entry", "(entry)", false, inherited);
+                    if (collection.Mode is not null)
+                    {
+                        entries[itemPath] = new ConfigEntry(itemPath, "entry", "(entry)", false, inherited);
+                    }
+
                     foreach (var setting in collection.Settings)
                     {
-                        var path = Join(itemPath, setting.Keyword);
+                        var path = EntrySettingPath(itemPath, collection, setting);
                         var value = GetValue(item, setting);
                         entries[path] = new ConfigEntry(path, value?.ToJsonString() ?? "null", DisplayValue(setting, value), setting.IsSecret, setting.ApplyMode);
                     }
@@ -694,6 +698,13 @@ internal static partial class ConfigurationModel
             }
         }
     }
+
+    /// <summary>
+    /// CLI path of an entry's setting: the entry path itself for one-line collections (no sub-mode),
+    /// otherwise the entry path followed by the setting keyword.
+    /// </summary>
+    private static string EntrySettingPath(string itemPath, ConfigCollection collection, ConfigSetting setting) =>
+        collection.Mode is null ? itemPath : Join(itemPath, setting.Keyword);
 
     /// <summary>Masked, single-line display for a setting value.</summary>
     public static string DisplayValue(ConfigSetting setting, JsonNode? value)
@@ -745,8 +756,18 @@ internal static partial class ConfigurationModel
         {
             foreach (var item in (node[collection.JsonName] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
             {
-                sb.Append("\r\n").Append(indent).Append(collection.Keyword).Append(' ')
-                    .Append(AsString(item[collection.KeyJsonName]));
+                var entry = collection.Keyword + " " + AsString(item[collection.KeyJsonName]);
+                if (collection.Mode is null)
+                {
+                    foreach (var setting in collection.Settings)
+                    {
+                        sb.Append("\r\n").Append(indent).Append(entry).Append(' ').Append(DisplayValue(setting, GetValue(item, setting)));
+                    }
+
+                    continue;
+                }
+
+                sb.Append("\r\n").Append(indent).Append(entry);
                 foreach (var setting in collection.Settings)
                 {
                     RenderSetting(sb, indent + " ", setting, GetValue(item, setting));

@@ -31,7 +31,13 @@ internal enum ConfigurationLineAction
     PromptSecret,
 
     /// <summary>Persist the candidate (<c>write</c>).</summary>
-    Write
+    Write,
+
+    /// <summary>
+    /// Run <see cref="ConfigurationLineResult.ExecCommand"/> (a read-only <c>show</c> command from <c>do</c>)
+    /// through the privileged EXEC dispatcher, which authorizes it.
+    /// </summary>
+    ExecuteExec
 }
 
 /// <summary>
@@ -40,13 +46,31 @@ internal enum ConfigurationLineAction
 /// <param name="Setting">Secret setting.</param>
 /// <param name="Container">Candidate object that owns the setting.</param>
 /// <param name="Subject">Hash subject (username for passwords).</param>
-internal sealed record ConfigurationSecretRequest(ConfigSetting Setting, JsonObject Container, string Subject)
+/// <param name="AddEntry">
+/// When set, <paramref name="Container"/> is a new entry that this adds to the candidate only after the
+/// secret is accepted, so a cancelled or rejected prompt leaves no half-created entry.
+/// </param>
+/// <param name="EntryName">
+/// Display name of the entry, for example <c>enable-secret-level 5</c>: named in creation messages and, for an
+/// existing one-line entry, in the hint for removing it.
+/// </param>
+internal sealed record ConfigurationSecretRequest(
+    ConfigSetting Setting,
+    JsonObject Container,
+    string Subject,
+    Action? AddEntry = null,
+    string? EntryName = null)
 {
     /// <summary>First prompt text.</summary>
     public string Prompt => Setting.Kind == ConfigValueKind.PasswordHash ? "Enter password: " : "Enter secret: ";
 
     /// <summary>Confirmation prompt text.</summary>
     public string ConfirmPrompt => Setting.Kind == ConfigValueKind.PasswordHash ? "Confirm password: " : "Confirm secret: ";
+
+    /// <summary>Printed when either prompt is cancelled.</summary>
+    public string CancelledMessage => AddEntry is null
+        ? "% Cancelled. Value not changed."
+        : "% Cancelled. '" + EntryName + "' was not created.";
 }
 
 /// <summary>
@@ -56,11 +80,13 @@ internal sealed record ConfigurationSecretRequest(ConfigSetting Setting, JsonObj
 /// <param name="Output">Text to print (no trailing newline).</param>
 /// <param name="Secret">Secret request for <see cref="ConfigurationLineAction.PromptSecret"/>.</param>
 /// <param name="ForgetHistory">The line may contain secret material and must be dropped from history.</param>
+/// <param name="ExecCommand">EXEC command line for <see cref="ConfigurationLineAction.ExecuteExec"/>.</param>
 internal sealed record ConfigurationLineResult(
     ConfigurationLineAction Action,
     string? Output = null,
     ConfigurationSecretRequest? Secret = null,
-    bool ForgetHistory = false);
+    bool ForgetHistory = false,
+    string? ExecCommand = null);
 
 /// <summary>
 /// Configuration-mode command interpreter (stateless; state lives in <see cref="ConfigurationEditSession"/>).
@@ -114,6 +140,7 @@ internal sealed class ConfigurationModeProcessor
         Help,
         No,
         Default,
+        Do,
         Setting,
         Section,
         Collection
@@ -195,13 +222,17 @@ internal sealed class ConfigurationModeProcessor
                 return NoArguments(tokens, prompt, line) ?? Continue(FormatValidation(edit));
             case EntryKind.Show:
                 return ExecuteShow(edit, tokens, prompt, line);
+            case EntryKind.Do:
+                return ExecuteDo(edit, tokens, prompt, line);
             case EntryKind.No:
             case EntryKind.Default:
                 return ExecuteNegation(edit, entry.Kind == EntryKind.Default, line, tokens, prompt);
             case EntryKind.Section:
                 return NoArguments(tokens, prompt, line) ?? EnterSection(edit, entry.Section!);
+            case EntryKind.Collection when IsSingleLineCollection(entry.Collection!):
+                return ExecuteSecretEntry(edit, entry.Collection!, line, tokens, prompt);
             case EntryKind.Collection:
-                return EnterCollection(edit, entry.Collection!, line, tokens, prompt);
+                return ExecuteUsername(edit, entry.Collection!, line, tokens, prompt);
             default:
                 return ExecuteSetting(edit, entry.Setting!, line, tokens, prompt);
         }
@@ -217,19 +248,22 @@ internal sealed class ConfigurationModeProcessor
     public string? ApplySecret(ConfigurationSecretRequest request, string secret, string confirmation)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var unchanged = request.AddEntry is null ? " Value not changed." : " '" + request.EntryName + "' was not created.";
         if (!string.Equals(secret, confirmation, StringComparison.Ordinal))
         {
-            return "% Entries do not match. Value not changed.";
+            return "% Entries do not match." + unchanged;
         }
 
         if (string.IsNullOrEmpty(secret))
         {
-            return "% An empty value is not accepted. Use 'no " + request.Setting.Keyword + "' to remove it.";
+            return request.AddEntry is null
+                ? "% An empty value is not accepted. Use 'no " + (request.EntryName ?? request.Setting.Keyword) + "' to remove it."
+                : "% An empty value is not accepted." + unchanged;
         }
 
         if (secret.Length > request.Setting.MaxLength || secret.Any(char.IsControl))
         {
-            return "% Invalid value. Value not changed.";
+            return "% Invalid value." + unchanged;
         }
 
         var stored = request.Setting.Kind switch
@@ -239,6 +273,7 @@ internal sealed class ConfigurationModeProcessor
             _ => secret
         };
         ConfigurationModel.SetValue(request.Container, request.Setting, JsonValue.Create(stored));
+        request.AddEntry?.Invoke();
         return null;
     }
 
@@ -328,8 +363,11 @@ internal sealed class ConfigurationModeProcessor
     public CliDiscoveryResult Help(ConfigurationEditSession edit, string line, int cursor, int terminalColumns)
     {
         var (start, partial, candidates) = Candidates(edit, line, cursor);
+        // A partly typed word must be completed before the line can execute, so <cr> is shown only after a space.
         var entries = candidates
-            .Where(c => partial.Length == 0 || c.Token.StartsWith(partial, StringComparison.OrdinalIgnoreCase) || c.Token.StartsWith('<'))
+            .Where(c => partial.Length == 0 ||
+                        c.Token.StartsWith(partial, StringComparison.OrdinalIgnoreCase) ||
+                        (c.Token.StartsWith('<') && c.Token != "<cr>"))
             .ToList();
         if (entries.Count == 0)
         {
@@ -379,21 +417,20 @@ internal sealed class ConfigurationModeProcessor
         switch (first!.Kind)
         {
             case EntryKind.Show:
-                if (rest.Count == 0)
-                {
-                    list.AddRange(ShowTargets);
-                }
-                else if (rest.Count == 1 && "configuration".StartsWith(rest[0].Text, StringComparison.OrdinalIgnoreCase))
-                {
-                    list.Add(("changes", "Unsaved changes in this session (secrets masked)"));
-                }
-
+                list.AddRange(ShowCandidates(rest));
+                break;
+            case EntryKind.Do:
+                list.AddRange(DoCandidates(rest));
                 break;
             case EntryKind.Write:
                 if (rest.Count == 0)
                 {
                     list.Add(("memory", "Write to startup-config (appsettings.json)"));
-                    list.Add(("<cr>", string.Empty));
+                    list.Add(("<cr>", "Validate and save the candidate configuration"));
+                }
+                else if (rest.Count == 1 && IsPrefixOf("memory", rest[0].Text))
+                {
+                    list.Add(("<cr>", "Validate and save the candidate configuration"));
                 }
 
                 break;
@@ -409,10 +446,18 @@ internal sealed class ConfigurationModeProcessor
                 }
                 else if (Resolve(targets, rest[0].Text) is (MatchOutcome.Unique, { } target))
                 {
-                    if (target.Kind == EntryKind.Collection && rest.Count == 1)
+                    var verb = first.Kind == EntryKind.Default ? "Reset to the default" : "Remove or negate the setting";
+                    if (target.Kind == EntryKind.Collection)
                     {
-                        list.AddRange(ExistingKeys(edit.Current, target.Collection!).Select(k => (k, target.Collection!.Description)));
-                        list.Add((target.Collection!.KeyHelp, target.Collection.Description));
+                        if (rest.Count == 1)
+                        {
+                            list.AddRange(ExistingKeys(edit.Current, target.Collection!).Select(k => (k, "Remove this entry")));
+                        }
+                        else if (rest.Count == 2 && TryParseKey(target.Collection!, rest[1].Text, out var key, out _) &&
+                                 FindEntry(edit.Current, target.Collection!, key) is not null)
+                        {
+                            list.Add(("<cr>", "Remove '" + target.Collection!.Keyword + " " + key + "'"));
+                        }
                     }
                     else if (target.Setting is { Shape: ConfigShape.Map } map && rest.Count == 1 && first.Kind == EntryKind.No)
                     {
@@ -420,29 +465,34 @@ internal sealed class ConfigurationModeProcessor
                         list.AddRange((current ?? new JsonObject()).Select(p => (p.Key, "Remove this override")));
                         list.Add(("<cr>", "Remove all overrides"));
                     }
+                    else if (target.Setting is { Shape: ConfigShape.Map } && rest.Count == 2 && first.Kind == EntryKind.No)
+                    {
+                        list.Add(("<cr>", "Remove this override"));
+                    }
                     else if (rest.Count == 1)
                     {
-                        list.Add(("<cr>", string.Empty));
+                        list.Add(("<cr>", verb));
                     }
                 }
 
                 break;
             }
 
+            case EntryKind.Collection when IsSingleLineCollection(first.Collection!):
+                list.AddRange(SecretEntryCandidates(edit, first.Collection!, rest));
+                break;
             case EntryKind.Collection:
-                if (rest.Count == 0)
-                {
-                    list.AddRange(ExistingKeys(edit.Current, first.Collection!).Select(k => (k, first.Collection!.Description)));
-                    list.Add((first.Collection!.KeyHelp, first.Collection.Description));
-                }
-                else if (rest.Count == 1)
-                {
-                    list.Add(("<cr>", string.Empty));
-                }
-
+                list.AddRange(UsernameCandidates(edit, first.Collection!, rest));
                 break;
             case EntryKind.Setting:
                 list.AddRange(ValueCandidates(first.Setting!, rest));
+                break;
+            case EntryKind.Section:
+                if (rest.Count == 0)
+                {
+                    list.Add(("<cr>", "Enter " + first.Section!.Mode + " mode"));
+                }
+
                 break;
             default:
                 if (rest.Count == 0)
@@ -456,31 +506,224 @@ internal sealed class ConfigurationModeProcessor
         return (start, partial, list);
     }
 
+    /// <summary>Help/completion after <c>show</c> in configuration mode.</summary>
+    private static IEnumerable<(string, string)> ShowCandidates(List<Token> rest)
+    {
+        if (rest.Count == 0)
+        {
+            return ShowTargets;
+        }
+
+        var targets = ShowTargets.Select(t => new Entry(t.Item1, t.Item2, EntryKind.Show)).ToList();
+        if (Resolve(targets, rest[0].Text) is not (MatchOutcome.Unique, { } target))
+        {
+            return [];
+        }
+
+        if (target.Keyword == "configuration")
+        {
+            return rest.Count switch
+            {
+                1 => [("changes", "Unsaved changes in this session (secrets masked)")],
+                2 when IsPrefixOf("changes", rest[1].Text) => [("<cr>", string.Empty)],
+                _ => []
+            };
+        }
+
+        return rest.Count == 1 ? [("<cr>", string.Empty)] : [];
+    }
+
+    /// <summary>Help/completion after <c>do</c>: only <c>show</c>, then the EXEC <c>show</c> grammar.</summary>
+    private static IEnumerable<(string, string)> DoCandidates(List<Token> rest)
+    {
+        if (rest.Count == 0)
+        {
+            return [("show", "Run a read-only privileged EXEC show command")];
+        }
+
+        if (!IsPrefixOf("show", rest[0].Text))
+        {
+            return [];
+        }
+
+        var targets = DoShowTargets();
+        if (rest.Count == 1)
+        {
+            return targets.Select(t => (t.Keyword, t.Description));
+        }
+
+        if (Resolve(targets, rest[1].Text) is not (MatchOutcome.Unique, { } target))
+        {
+            return [];
+        }
+
+        if (ExecShowNode(target.Keyword) is not { } node)
+        {
+            return ShowCandidates(rest.Skip(1).ToList());
+        }
+
+        // Walk the EXEC catalog for deeper show keywords and arguments.
+        var index = 2;
+        while (index < rest.Count)
+        {
+            var child = node.Children.FirstOrDefault(c => c.Token.Equals(rest[index].Text, StringComparison.OrdinalIgnoreCase));
+            child ??= node.Children.Where(c => IsPrefixOf(c.Token, rest[index].Text)).ToList() is [var only] ? only : null;
+            if (child is null)
+            {
+                // The token is the node's argument value; nothing may follow it.
+                return node.Argument is not null && index == rest.Count - 1 && (node.CommandIdWithArgument ?? node.CommandId) is not null
+                    ? [("<cr>", string.Empty)]
+                    : [];
+            }
+
+            node = child;
+            index++;
+        }
+
+        var list = node.Children.Select(c => (c.Token, c.Description)).ToList();
+        if (node.Argument is { } arg)
+        {
+            list.Add((arg.DisplayName, arg.Description));
+        }
+
+        if (node.CommandId is not null && node.Argument is not { Optional: false })
+        {
+            list.Add(("<cr>", string.Empty));
+        }
+
+        return list;
+    }
+
+    /// <summary>Targets accepted after <c>do show</c>: the EXEC show commands plus configuration-session views.</summary>
+    private static List<Entry> DoShowTargets() =>
+        (CliCommandCatalog.Roots.First(r => r.Token == "show").Children
+            .Select(c => new Entry(c.Token, c.Description, EntryKind.Do)))
+        .Concat(ShowTargets
+            .Where(t => ExecShowNode(t.Item1) is null)
+            .Select(t => new Entry(t.Item1, t.Item2, EntryKind.Show)))
+        .ToList();
+
+    /// <summary>EXEC catalog node for <c>show &lt;keyword&gt;</c>, or <see langword="null"/>.</summary>
+    private static CliCommandNode? ExecShowNode(string keyword) =>
+        CliCommandCatalog.Roots.First(r => r.Token == "show").Children
+            .FirstOrDefault(c => c.Token.Equals(keyword, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Help/completion for <c>username &lt;name&gt; [privilege &lt;1-15&gt; | password]</c>.</summary>
+    private static IEnumerable<(string, string)> UsernameCandidates(ConfigurationEditSession edit, ConfigCollection collection, List<Token> rest)
+    {
+        if (rest.Count == 0)
+        {
+            return ExistingKeys(edit.Current, collection).Select(k => (k, "Existing account"))
+                .Append((collection.KeyHelp, "Account name (letters, digits, and . _ @ + -)"));
+        }
+
+        if (!TryParseKey(collection, rest[0].Text, out var key, out _))
+        {
+            return [];
+        }
+
+        var exists = FindEntry(edit.Current, collection, key) is not null;
+        if (rest.Count == 1)
+        {
+            return exists
+                ? [("privilege", "Set the account's privilege level"),
+                   ("password", "Change the account's password (hidden prompt)"),
+                   ("<cr>", "Edit this account (enters config-user mode)")]
+                : [("privilege", "Privilege level of the new account (required)")];
+        }
+
+        var options = new List<Entry> { new("privilege", string.Empty, EntryKind.Setting) };
+        if (exists)
+        {
+            options.Add(new Entry("password", string.Empty, EntryKind.Setting));
+        }
+
+        if (Resolve(options, rest[1].Text) is not (MatchOutcome.Unique, { } option))
+        {
+            return [];
+        }
+
+        if (option.Keyword == "password")
+        {
+            return rest.Count == 2 ? [("<cr>", "Prompt for the new password (hidden input)")] : [];
+        }
+
+        return rest.Count switch
+        {
+            2 => [("<1-15>", "Privilege level")],
+            3 when ConfigurationModel.TryParseValue(PrivilegeSetting(collection), rest[2].Text, out _, out _) =>
+                [("<cr>", exists ? "Set the privilege level" : "Create the account (prompts for a password)")],
+            _ => []
+        };
+    }
+
+    /// <summary>Help/completion for <c>enable-secret-level &lt;1-15&gt; [hash &lt;hash&gt;]</c>.</summary>
+    private static IEnumerable<(string, string)> SecretEntryCandidates(ConfigurationEditSession edit, ConfigCollection collection, List<Token> rest)
+    {
+        if (rest.Count == 0)
+        {
+            return ExistingKeys(edit.Current, collection).Select(k => (k, "Existing entry"))
+                .Append((collection.KeyHelp, collection.Description));
+        }
+
+        if (!TryParseKey(collection, rest[0].Text, out _, out _))
+        {
+            return [];
+        }
+
+        return rest.Count switch
+        {
+            1 => [("<cr>", "Prompt for the secret (hidden input)"), ("hash", "Set an existing Identity V3 hash")],
+            2 when IsPrefixOf("hash", rest[1].Text) => [("<hash>", "Identity V3 hash")],
+            3 when IsPrefixOf("hash", rest[1].Text) => [("<cr>", string.Empty)],
+            _ => []
+        };
+    }
+
     /// <summary>Value help/completion for a setting.</summary>
     private static IEnumerable<(string, string)> ValueCandidates(ConfigSetting setting, List<Token> rest)
     {
         if (setting.IsSecret)
         {
-            if (rest.Count > 0)
-            {
-                yield break;
-            }
-
             if (setting.Kind == ConfigValueKind.HostPrivateKey)
             {
-                yield return ("generate", "Generate a new SSH host key");
+                if (rest.Count == 0)
+                {
+                    yield return ("generate", "Generate a new SSH host key");
+                }
+                else if (rest.Count == 1 && IsPrefixOf("generate", rest[0].Text))
+                {
+                    yield return ("<cr>", string.Empty);
+                }
+
                 yield break;
             }
 
-            yield return ("<cr>", "Prompt for the value (hidden input)");
-            if (setting.Kind is ConfigValueKind.PasswordHash or ConfigValueKind.EnableSecretHash)
+            var hashable = setting.Kind is ConfigValueKind.PasswordHash or ConfigValueKind.EnableSecretHash;
+            if (rest.Count == 0)
             {
-                yield return ("hash", "Set an existing Identity V3 hash");
+                yield return ("<cr>", "Prompt for the value (hidden input)");
+                if (hashable)
+                {
+                    yield return ("hash", "Set an existing Identity V3 hash");
+                }
+            }
+            else if (hashable && IsPrefixOf("hash", rest[0].Text))
+            {
+                if (rest.Count == 1)
+                {
+                    yield return ("<hash>", "Identity V3 hash");
+                }
+                else if (rest.Count == 2)
+                {
+                    yield return ("<cr>", string.Empty);
+                }
             }
 
             yield break;
         }
 
+        var freeText = setting.Kind is ConfigValueKind.Text or ConfigValueKind.DirectoryPath or ConfigValueKind.PublicKeyLine;
         switch (setting.Shape)
         {
             case ConfigShape.List when rest.Count == 0:
@@ -495,6 +738,21 @@ internal sealed class ConfigurationModeProcessor
                 }
 
                 yield break;
+            case ConfigShape.List:
+                if (IsPrefixOf("set", rest[0].Text) && !freeText)
+                {
+                    foreach (var value in ScalarCandidates(setting))
+                    {
+                        yield return value;
+                    }
+                }
+
+                if (rest.Count == 2 || freeText || IsPrefixOf("set", rest[0].Text))
+                {
+                    yield return ("<cr>", string.Empty);
+                }
+
+                yield break;
             case ConfigShape.Map when rest.Count == 0:
                 yield return ("<source>", "Log source (for example Microsoft.Hosting)");
                 yield break;
@@ -504,6 +762,9 @@ internal sealed class ConfigurationModeProcessor
                     yield return value;
                 }
 
+                yield break;
+            case ConfigShape.Map when rest.Count == 2:
+                yield return ("<cr>", string.Empty);
                 yield break;
             case ConfigShape.Scalar when rest.Count == 0:
                 foreach (var value in ScalarCandidates(setting))
@@ -516,6 +777,9 @@ internal sealed class ConfigurationModeProcessor
                     yield return ("<cr>", "Set to true");
                 }
 
+                yield break;
+            case ConfigShape.Scalar when rest.Count == 1 || freeText:
+                yield return ("<cr>", string.Empty);
                 yield break;
         }
     }
@@ -600,6 +864,43 @@ internal sealed class ConfigurationModeProcessor
         });
     }
 
+    /// <summary>
+    /// Executes <c>do show ...</c>. Configuration-session views run here; every other target is handed to
+    /// the EXEC dispatcher, which authorizes it like any EXEC line. Nothing but <c>show</c> is accepted.
+    /// </summary>
+    private ConfigurationLineResult ExecuteDo(ConfigurationEditSession edit, List<Token> tokens, string prompt, string line)
+    {
+        if (tokens.Count < 2)
+        {
+            return Continue(Incomplete);
+        }
+
+        if (!IsPrefixOf("show", tokens[1].Text))
+        {
+            return Continue(Caret(prompt, tokens[1]) + "\r\n% Invalid input detected at '^' marker.\r\n" +
+                            "% 'do' runs read-only EXEC 'show' commands only.");
+        }
+
+        if (tokens.Count < 3)
+        {
+            return Continue(Incomplete);
+        }
+
+        var (outcome, target) = Resolve(DoShowTargets(), tokens[2].Text);
+        if (outcome != MatchOutcome.Unique)
+        {
+            return Error(outcome, prompt, line, tokens[2]);
+        }
+
+        if (target!.Kind == EntryKind.Show)
+        {
+            return ExecuteShow(edit, tokens.Skip(1).ToList(), prompt, line);
+        }
+
+        var command = "show " + target.Keyword + (tokens.Count > 3 ? " " + line[tokens[3].Start..].Trim() : string.Empty);
+        return new ConfigurationLineResult(ConfigurationLineAction.ExecuteExec, ExecCommand: command);
+    }
+
     /// <summary>Formats <c>validate</c>.</summary>
     private string FormatValidation(ConfigurationEditSession edit)
     {
@@ -620,8 +921,12 @@ internal sealed class ConfigurationModeProcessor
         return new ConfigurationLineResult(ConfigurationLineAction.Continue);
     }
 
-    /// <summary>Enters (creating when absent) a collection entry.</summary>
-    private static ConfigurationLineResult EnterCollection(
+    /// <summary>
+    /// Executes <c>username &lt;name&gt;</c> (edit an existing account), <c>username &lt;name&gt; privilege &lt;1-15&gt;</c>
+    /// (set the level, or create the account behind a hidden password prompt), or
+    /// <c>username &lt;name&gt; password</c> (change an existing account's password at a hidden prompt).
+    /// </summary>
+    private static ConfigurationLineResult ExecuteUsername(
         ConfigurationEditSession edit,
         ConfigCollection collection,
         string line,
@@ -633,36 +938,181 @@ internal sealed class ConfigurationModeProcessor
             return Continue(Incomplete);
         }
 
-        if (tokens.Count > 2)
+        if (!TryParseKey(collection, tokens[1].Text, out var key, out var error))
         {
-            return Invalid(prompt, line, tokens[2]);
+            return InvalidArgument(prompt, tokens[1], error);
+        }
+
+        var item = FindEntry(edit.Current, collection, key);
+        var name = collection.Keyword + " " + key;
+        if (tokens.Count == 2)
+        {
+            return item is null
+                ? Continue(Incomplete + "\r\n% A new account needs a privilege level: " + name + " privilege <1-15>")
+                : EnterEntry(edit, collection, item, key);
+        }
+
+        var options = new List<Entry>
+        {
+            new("privilege", string.Empty, EntryKind.Setting),
+            new("password", string.Empty, EntryKind.Setting)
+        };
+        var (outcome, option) = Resolve(options, tokens[2].Text);
+        if (outcome != MatchOutcome.Unique)
+        {
+            return Error(outcome, prompt, line, tokens[2]);
+        }
+
+        var password = collection.Settings.First(s => s.Kind == ConfigValueKind.PasswordHash);
+        if (option!.Keyword == "password")
+        {
+            if (tokens.Count > 3)
+            {
+                return new ConfigurationLineResult(ConfigurationLineAction.Continue, PlaintextRejected + ".", ForgetHistory: true);
+            }
+
+            return item is null
+                ? Continue("% Account '" + key + "' does not exist. Create it with '" + name + " privilege <1-15>'.")
+                : new ConfigurationLineResult(
+                    ConfigurationLineAction.PromptSecret,
+                    Secret: new ConfigurationSecretRequest(password, item, ConfigurationModel.AsString(item[collection.KeyJsonName]) ?? key));
+        }
+
+        if (tokens.Count < 4)
+        {
+            return Continue(Incomplete);
+        }
+
+        if (tokens.Count > 4)
+        {
+            // Trailing text here is often a habitual inline password, so the line never reaches history.
+            return Continue(Caret(prompt, tokens[4]) + "\r\n% Invalid input detected at '^' marker.\r\n" +
+                            "% Passwords are never accepted on the command line; '" + name + " privilege <1-15>' prompts for one.")
+                with { ForgetHistory = true };
+        }
+
+        var privilege = PrivilegeSetting(collection);
+        if (!ConfigurationModel.TryParseValue(privilege, tokens[3].Text, out var level, out var levelError))
+        {
+            return InvalidArgument(prompt, tokens[3], levelError);
+        }
+
+        if (item is not null)
+        {
+            ConfigurationModel.SetValue(item, privilege, level);
+            return new ConfigurationLineResult(ConfigurationLineAction.Continue);
+        }
+
+        var created = NewEntry(collection, key);
+        ConfigurationModel.SetValue(created, privilege, level);
+        var node = edit.Current.Node;
+        return new ConfigurationLineResult(
+            ConfigurationLineAction.PromptSecret,
+            Secret: new ConfigurationSecretRequest(password, created, key, () => AddEntry(node, collection, created), name));
+    }
+
+    /// <summary>
+    /// Executes <c>enable-secret-level &lt;1-15&gt;</c> (hidden prompt) or
+    /// <c>enable-secret-level &lt;1-15&gt; hash &lt;hash&gt;</c>, creating or replacing the entry.
+    /// </summary>
+    private ConfigurationLineResult ExecuteSecretEntry(
+        ConfigurationEditSession edit,
+        ConfigCollection collection,
+        string line,
+        List<Token> tokens,
+        string prompt)
+    {
+        if (tokens.Count < 2)
+        {
+            return Continue(Incomplete);
         }
 
         if (!TryParseKey(collection, tokens[1].Text, out var key, out var error))
         {
-            return Continue(error);
+            return InvalidArgument(prompt, tokens[1], error);
         }
 
-        if (edit.Current.Node[collection.JsonName] is not JsonArray array)
+        var setting = collection.Settings[0];
+        var name = collection.Keyword + " " + key;
+        var node = edit.Current.Node;
+        var existing = FindEntry(edit.Current, collection, key);
+        var target = existing ?? NewEntry(collection, key);
+        Action? add = existing is null ? () => AddEntry(node, collection, target) : null;
+        if (tokens.Count == 2)
+        {
+            return new ConfigurationLineResult(
+                ConfigurationLineAction.PromptSecret,
+                Secret: new ConfigurationSecretRequest(setting, target, OperatorPasswordHasher.EnableSecretHashSubject, add, name));
+        }
+
+        if (!IsPrefixOf("hash", tokens[2].Text))
+        {
+            return new ConfigurationLineResult(
+                ConfigurationLineAction.Continue,
+                PlaintextRejected + ", or use '" + name + " hash <hash>'.",
+                ForgetHistory: true);
+        }
+
+        if (tokens.Count != 4)
+        {
+            var failure = tokens.Count < 4 ? Continue(Incomplete) : Invalid(prompt, line, tokens[4]);
+            return failure with { ForgetHistory = true };
+        }
+
+        if (!_hasher.IsWellFormedHash(tokens[3].Text))
+        {
+            return new ConfigurationLineResult(ConfigurationLineAction.Continue, "% Invalid value. An Identity V3 hash is required.", ForgetHistory: true);
+        }
+
+        ConfigurationModel.SetValue(target, setting, JsonValue.Create(tokens[3].Text));
+        add?.Invoke();
+        return new ConfigurationLineResult(ConfigurationLineAction.Continue, ForgetHistory: true);
+    }
+
+    /// <summary>
+    /// Whether a collection's entries are configured on one line in the parent context (no sub-mode), as
+    /// <c>enable-secret-level</c> is. The schema guarantees such entries hold exactly one hashed secret, and
+    /// that every collection with a sub-mode is an operator-account collection (<c>username</c>).
+    /// </summary>
+    private static bool IsSingleLineCollection(ConfigCollection collection) => collection.Mode is null;
+
+    /// <summary>The privilege-level setting of an account collection.</summary>
+    private static ConfigSetting PrivilegeSetting(ConfigCollection collection) =>
+        collection.Settings.First(s => s.Kind == ConfigValueKind.PrivilegeLevel);
+
+    /// <summary>Finds an entry by key in the current context.</summary>
+    private static JsonObject? FindEntry(ConfigurationFrame frame, ConfigCollection collection, string key) =>
+        frame.Node[collection.JsonName] is JsonArray array ? ConfigurationModel.FindItem(array, collection, key) : null;
+
+    /// <summary>Creates a detached entry with its key and default settings.</summary>
+    private static JsonObject NewEntry(ConfigCollection collection, string key)
+    {
+        var item = new JsonObject(ConfigurationModel.NodeOptions) { [collection.KeyJsonName] = JsonValue.Create(key) };
+        foreach (var setting in collection.Settings)
+        {
+            ConfigurationModel.SetValue(item, setting, setting.Default());
+        }
+
+        return item;
+    }
+
+    /// <summary>Adds an entry to a collection, creating the array when absent.</summary>
+    private static void AddEntry(JsonObject node, ConfigCollection collection, JsonObject item)
+    {
+        if (node[collection.JsonName] is not JsonArray array)
         {
             array = new JsonArray();
-            edit.Current.Node[collection.JsonName] = array;
+            node[collection.JsonName] = array;
         }
 
-        var item = ConfigurationModel.FindItem(array, collection, key);
-        if (item is null)
-        {
-            item = new JsonObject(ConfigurationModel.NodeOptions) { [collection.KeyJsonName] = JsonValue.Create(key) };
-            foreach (var setting in collection.Settings)
-            {
-                ConfigurationModel.SetValue(item, setting, setting.Default());
-            }
+        array.Add(item);
+    }
 
-            array.Add(item);
-        }
-
+    /// <summary>Enters an entry's sub-mode.</summary>
+    private static ConfigurationLineResult EnterEntry(ConfigurationEditSession edit, ConfigCollection collection, JsonObject item, string key)
+    {
         var itemKey = ConfigurationModel.AsString(item[collection.KeyJsonName]) ?? key;
-        edit.Push(new ConfigurationFrame(collection.Mode, Join(edit.Current.Path, collection.Keyword + " " + itemKey), null, collection, item));
+        edit.Push(new ConfigurationFrame(collection.Mode!, Join(edit.Current.Path, collection.Keyword + " " + itemKey), null, collection, item));
         return new ConfigurationLineResult(ConfigurationLineAction.Continue);
     }
 
@@ -732,7 +1182,7 @@ internal sealed class ConfigurationModeProcessor
 
             if (!TryParseKey(collection, tokens[2].Text, out var key, out var error))
             {
-                return Continue(error);
+                return InvalidArgument(prompt, tokens[2], error);
             }
 
             if (node[collection.JsonName] is not JsonArray array ||
@@ -831,12 +1281,12 @@ internal sealed class ConfigurationModeProcessor
                 var source = tokens[1].Text;
                 if (source.Length > 256 || !ConfigurationModel.LogSourceRegex().IsMatch(source))
                 {
-                    return Continue("% Invalid value. A log source name such as Microsoft.Hosting is required.");
+                    return InvalidArgument(prompt, tokens[1], "% Invalid value. A log source name such as Microsoft.Hosting is required.");
                 }
 
                 if (!ConfigurationModel.TryParseValue(setting, tokens[2].Text, out var level, out var error))
                 {
-                    return Continue(error);
+                    return InvalidArgument(prompt, tokens[2], error);
                 }
 
                 if (ConfigurationModel.GetValue(node, setting) is not JsonObject map)
@@ -875,7 +1325,7 @@ internal sealed class ConfigurationModeProcessor
 
                 if (!ConfigurationModel.TryParseValue(setting, raw, out var value, out var error))
                 {
-                    return Continue(error);
+                    return InvalidArgument(prompt, tokens[1], error);
                 }
 
                 ConfigurationModel.SetValue(node, setting, value);
@@ -919,11 +1369,11 @@ internal sealed class ConfigurationModeProcessor
         }
 
         var parsed = new List<string>();
-        foreach (var raw in rawValues)
+        for (var i = 0; i < rawValues.Count; i++)
         {
-            if (!ConfigurationModel.TryParseValue(setting, raw, out var value, out var error))
+            if (!ConfigurationModel.TryParseValue(setting, rawValues[i], out var value, out var error))
             {
-                return Continue(error);
+                return InvalidArgument(prompt, tokens[2 + i], error);
             }
 
             parsed.Add(ConfigurationModel.AsString(value)!);
@@ -1034,6 +1484,7 @@ internal sealed class ConfigurationModeProcessor
             entries.Add(new Entry("help", "Show the commands available at this level", EntryKind.Help));
             entries.Add(new Entry("no", "Negate a setting or remove an entry", EntryKind.No));
             entries.Add(new Entry("default", "Reset a setting to its default", EntryKind.Default));
+            entries.Add(new Entry("do", "Run a read-only EXEC show command (for example 'do show users')", EntryKind.Do));
         }
 
         return entries;
@@ -1042,7 +1493,10 @@ internal sealed class ConfigurationModeProcessor
     /// <summary>Help syntax for an entry.</summary>
     private static string Syntax(Entry entry) => entry.Kind switch
     {
-        EntryKind.Collection => entry.Keyword + " " + entry.Collection!.KeyHelp,
+        EntryKind.Collection when IsSingleLineCollection(entry.Collection!) =>
+            entry.Keyword + " " + entry.Collection!.KeyHelp + " [hash <hash>]",
+        EntryKind.Collection => entry.Keyword + " " + entry.Collection!.KeyHelp + " [privilege <1-15> | password]",
+        EntryKind.Do => "do show <command>",
         EntryKind.Setting when entry.Setting!.Shape == ConfigShape.List => entry.Keyword + " add|remove|set <value>",
         EntryKind.Setting when entry.Setting!.Shape == ConfigShape.Map => entry.Keyword + " <source> <level>",
         EntryKind.Setting => entry.Keyword + " " + entry.Setting!.ValueHelp,
@@ -1114,7 +1568,18 @@ internal sealed class ConfigurationModeProcessor
 
     /// <summary>Cisco caret error under the offending token.</summary>
     private static ConfigurationLineResult Invalid(string prompt, string line, Token token) =>
-        Continue(new string(' ', prompt.Length + 1 + token.Start) + "^\r\n% Invalid input detected at '^' marker.");
+        Continue(Caret(prompt, token) + "\r\n% Invalid input detected at '^' marker.");
+
+    /// <summary>A well-formed command whose argument failed validation: caret under the argument plus the reason.</summary>
+    private static ConfigurationLineResult InvalidArgument(string prompt, Token token, string? reason) =>
+        Continue(Caret(prompt, token) + "\r\n" + (string.IsNullOrEmpty(reason) ? "% Invalid value." : reason));
+
+    /// <summary>Caret line under <paramref name="token"/> as echoed after the prompt.</summary>
+    private static string Caret(string prompt, Token token) => new string(' ', prompt.Length + 1 + token.Start) + "^";
+
+    /// <summary>Whether <paramref name="token"/> is a non-empty abbreviation of <paramref name="keyword"/>.</summary>
+    private static bool IsPrefixOf(string keyword, string token) =>
+        token.Length > 0 && keyword.StartsWith(token, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Continue with output.</summary>
     private static ConfigurationLineResult Continue(string? output) => new(ConfigurationLineAction.Continue, output);

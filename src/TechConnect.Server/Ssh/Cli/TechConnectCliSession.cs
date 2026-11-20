@@ -1039,6 +1039,30 @@ internal sealed class TechConnectCliSession
                 await WriteTextAsync(ConfigurationModeProcessor.FormatWriteResult(written) + "\r\n", cancellationToken)
                     .ConfigureAwait(false);
                 break;
+            case ConfigurationLineAction.ExecuteExec when result.ExecCommand is { } command:
+                await ExecuteDoAsync(command, cancellationToken).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Runs a <c>do show ...</c> command through the EXEC dispatcher (normal authorization and audit).
+    /// Only plain-output results are shown; anything that would act on the session is refused.
+    /// </summary>
+    private async Task ExecuteDoAsync(string command, CancellationToken cancellationToken)
+    {
+        var result = _dispatcher.Execute(
+            input: command,
+            loginIdentity: _operator,
+            activePrivilege: _activePrivilege,
+            selfSession: GetSelfSessionSnapshot(),
+            terminalColumns: _terminal.Columns);
+        var text = result.Action == CliCommandAction.Continue
+            ? result.Output
+            : "% This command cannot be run with 'do'.";
+        if (!string.IsNullOrEmpty(text))
+        {
+            await WriteTextAsync(text + "\r\n", cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1065,7 +1089,7 @@ internal sealed class TechConnectCliSession
         var first = await _lineReader!.ReadSecretLineAsync(cancellationToken).ConfigureAwait(false);
         if (first.Outcome != LineReadOutcome.Line)
         {
-            await WriteTextAsync("% Cancelled. Value not changed.\r\n", cancellationToken).ConfigureAwait(false);
+            await WriteTextAsync(request.CancelledMessage + "\r\n", cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -1073,7 +1097,7 @@ internal sealed class TechConnectCliSession
         var second = await _lineReader.ReadSecretLineAsync(cancellationToken).ConfigureAwait(false);
         if (second.Outcome != LineReadOutcome.Line)
         {
-            await WriteTextAsync("% Cancelled. Value not changed.\r\n", cancellationToken).ConfigureAwait(false);
+            await WriteTextAsync(request.CancelledMessage + "\r\n", cancellationToken).ConfigureAwait(false);
             return;
         }
 

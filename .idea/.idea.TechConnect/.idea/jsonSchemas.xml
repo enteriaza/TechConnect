@@ -23,6 +23,15 @@
                   <Item>
                     <option name="path" value="src/TechConnect.Client/appsettings.json" />
                   </Item>
+                  <Item>
+                    <option name="path" value="src/TechConnect.Server/appsettings.Development.example.json" />
+                  </Item>
+                  <Item>
+                    <option name="path" value="src/TechConnect.Server/appsettings.Development.json" />
+                  </Item>
+                  <Item>
+                    <option name="path" value="src/TechConnect.Server/appsettings.json" />
+                  </Item>
                 </list>
               </option>
             </SchemaInfo>

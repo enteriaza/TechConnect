@@ -184,17 +184,19 @@ public sealed class ConfigurationModeSessionTests : IDisposable
         await cli.SendAndWaitAsync("configure terminal", "TechConnect(config)#");
         await cli.SendAndWaitAsync("authentication", "TechConnect(config-auth)#");
         await cli.SendAndWaitAsync("local", "TechConnect(config-auth-local)#");
-        await cli.SendAndWaitAsync("username newop", "TechConnect(config-user)#");
-        await cli.SendAndWaitAsync("password", "Enter password: ");
+        await cli.SendAndWaitAsync("username newop privilege 5", "Enter password: ");
         await cli.SendAndWaitAsync(password, "Confirm password: ");
-        await cli.SendAndWaitAsync("different", "% Entries do not match. Value not changed.");
-        await cli.SendAndWaitAsync("password", "Enter password: ", 2);
+        await cli.SendAndWaitAsync("different", "% Entries do not match. 'username newop' was not created.");
+        await cli.SendAndWaitAsync("username newop privilege 5", "Enter password: ", 2);
         await cli.SendAndWaitAsync(password, "Confirm password: ", 2);
-        await cli.SendAndWaitAsync(password, "TechConnect(config-user)#", 3);
-        await cli.SendAndWaitAsync("write", "TechConnect(config-user)#", 4);
+        await cli.SendAndWaitAsync(password, "TechConnect(config-auth-local)#", 3);
+        await cli.SendAndWaitAsync("username newop password", "Enter password: ", 3);
+        await cli.SendAndWaitAsync("Zq-Mismatch-1", "Confirm password: ", 3);
+        await cli.SendAndWaitAsync("Zq-Mismatch-2", "% Entries do not match. Value not changed.");
+        await cli.SendAndWaitAsync("write", "TechConnect(config-auth-local)#", 5);
         await cli.SendAndWaitAsync("end", "TechConnect#", 2);
 
-        cli.Output.Should().NotContain(password).And.NotContain("different");
+        cli.Output.Should().NotContain(password).And.NotContain("different").And.NotContain("Zq-Mismatch");
         var users = JsonNode.Parse(_fixture.ReadFile())!["TechConnectServer"]!["Authentication"]!["Local"]!["LocalUsers"]!.AsArray();
         var stored = users.Single(u => u!["Username"]!.GetValue<string>() == "newop")!["PasswordHash"]!.GetValue<string>();
         stored.Should().NotBe(password).And.NotBeNullOrEmpty();
@@ -237,6 +239,146 @@ public sealed class ConfigurationModeSessionTests : IDisposable
         cli.Output.Should().NotContain(ConfigurationModeProcessor.DiscardedMessage, "the rejected line changed nothing");
         _fixture.ReadFile().Should().Be(before);
         _logger.AllText.Should().NotContain("Inline-Value");
+    }
+
+    /// <summary>
+    /// <c>do show</c> runs EXEC show commands (through the dispatcher) from inside a sub-mode; <c>do</c> never
+    /// runs configuration-changing or persisting commands, and the candidate stays unsaved.
+    /// </summary>
+    [Fact]
+    public async Task Do_RunsExecShow_RejectsOthers_StaysInMode()
+    {
+        var before = _fixture.ReadFile();
+        await using var cli = await CliHarness.StartAsync(_service, _audit, Level(15));
+
+        await cli.WaitForAsync("TechConnect#");
+        await cli.SendAndWaitAsync("configure terminal", "TechConnect(config)#");
+        await cli.SendAndWaitAsync("ssh", "TechConnect(config-ssh)#");
+        await cli.SendAndWaitAsync("port 2294", "TechConnect(config-ssh)#", 2);
+        cli.Output.Should().NotContain("SSH operator");
+        await cli.SendAndWaitAsync("do show users", "TechConnect(config-ssh)#", 3);
+        cli.Output.Should().Contain("SSH operator", "the EXEC show users output was produced");
+        await cli.SendAndWaitAsync("do show configuration changes", "TechConnect(config-ssh)#", 4);
+        cli.Output.Should().Contain("ssh port");
+        await cli.SendAndWaitAsync("do show startup-config", "TechConnect(config-ssh)#", 5);
+        await cli.SendAndWaitAsync("do write memory", "TechConnect(config-ssh)#", 6);
+        await cli.SendAndWaitAsync("do configure terminal", "TechConnect(config-ssh)#", 7);
+
+        cli.Count("'do' runs read-only EXEC 'show' commands only").Should().Be(2);
+        cli.Output.Should().NotContain("[OK]").And.NotContain("Building configuration");
+        _fixture.ReadFile().Should().Be(before);
+        await cli.SendAndWaitAsync("end", "TechConnect#", 2);
+        cli.Output.Should().Contain(ConfigurationModeProcessor.DiscardedMessage);
+    }
+
+    /// <summary><c>exit</c> climbs one level at a time; <c>end</c> returns to privileged EXEC from any depth.</summary>
+    [Fact]
+    public async Task Navigation_ExitClimbsOneLevel_EndReturnsToExec()
+    {
+        await using var cli = await CliHarness.StartAsync(_service, _audit, Level(15));
+
+        await cli.WaitForAsync("TechConnect#");
+        await cli.SendAndWaitAsync("configure terminal", "TechConnect(config)#");
+        await cli.SendAndWaitAsync("authentication", "TechConnect(config-auth)#");
+        await cli.SendAndWaitAsync("local", "TechConnect(config-auth-local)#");
+        await cli.SendAndWaitAsync("username admin", "TechConnect(config-user)#");
+        await cli.SendAndWaitAsync("exit", "TechConnect(config-auth-local)#", 2);
+        await cli.SendAndWaitAsync("exit", "TechConnect(config-auth)#", 2);
+        await cli.SendAndWaitAsync("local", "TechConnect(config-auth-local)#", 3);
+        await cli.SendAndWaitAsync("username admin", "TechConnect(config-user)#", 2);
+        await cli.SendAndWaitAsync("end", "TechConnect#", 2);
+
+        cli.Output.Should().NotContain(ConfigurationModeProcessor.DiscardedMessage, "navigation alone changes nothing");
+    }
+
+    /// <summary><c>?</c> shows context help without executing; Tab completes in place; the line is kept intact.</summary>
+    [Fact]
+    public async Task HelpAndTab_OverSsh_PreserveLine_AndNeverExecute()
+    {
+        await using var cli = await CliHarness.StartAsync(_service, _audit, Level(15));
+
+        await cli.WaitForAsync("TechConnect#");
+        await cli.SendAndWaitAsync("configure terminal", "TechConnect(config)#");
+        await cli.SendAndWaitAsync("authentication", "TechConnect(config-auth)#");
+        await cli.SendAndWaitAsync("local", "TechConnect(config-auth-local)#");
+        await cli.SendRawAsync("username newop ?");
+        await cli.WaitForAsync("Privilege level of the new account (required)");
+        cli.Output.Should().NotContain("Enter password: ");
+        await cli.SendRawAsync("\u0015username adm\t");
+        await cli.WaitForAsync("username admin ");
+        await cli.SendRawAsync("priv\t9\r");
+        await cli.SendAndWaitAsync("do show configuration changes", "username admin privilege-level");
+
+        cli.Output.Should().NotContain("newop privilege-level", "help never creates or changes anything");
+        cli.Output.Should().NotContain("% Invalid input").And.NotContain("% Incomplete");
+    }
+
+    /// <summary>Hidden password entry and secret-bearing lines never reach the screen or the command history.</summary>
+    [Fact]
+    public async Task SecretLines_NotEchoed_NotRecalledFromHistory()
+    {
+        const string password = "Hist0ry-Pass-Canary";
+        await using var cli = await CliHarness.StartAsync(_service, _audit, Level(15));
+
+        await cli.WaitForAsync("TechConnect#");
+        await cli.SendAndWaitAsync("configure terminal", "TechConnect(config)#");
+        await cli.SendAndWaitAsync("authentication", "TechConnect(config-auth)#");
+        await cli.SendAndWaitAsync("local", "TechConnect(config-auth-local)#");
+        await cli.SendAndWaitAsync("username newop privilege 5", "Enter password: ");
+        await cli.SendAndWaitAsync(password, "Confirm password: ");
+        await cli.SendAndWaitAsync(password, "TechConnect(config-auth-local)#", 2);
+        await cli.SendAndWaitAsync("username newop password Inline-Secret-X", "secrets are not accepted on the command line");
+        await cli.WaitForAsync("TechConnect(config-auth-local)#", 3);
+        await cli.SendRawAsync("\u001b[A");
+        await cli.WaitForAsync("username newop privilege 5", 2);
+        await cli.SendRawAsync("\u001b[A");
+        await cli.WaitForAsync("TechConnect(config-auth-local)# local");
+        await cli.SendRawAsync("\u0015");
+
+        cli.Count("Inline-Secret-X").Should().Be(1, "only the typed echo; the line was dropped from history");
+        cli.Output.Should().NotContain(password);
+        _logger.AllText.Should().NotContain(password).And.NotContain("Inline-Secret-X");
+        AuditText().Should().NotContain(password).And.NotContain("Inline-Secret-X");
+    }
+
+    /// <summary>
+    /// Privilege-specific enable secrets over SSH: hidden and confirmed, Ctrl+C creates nothing, the hash form is
+    /// dropped from history, views stay masked, and the session never leaves (config-auth-local).
+    /// </summary>
+    [Fact]
+    public async Task EnableSecretLevel_HiddenPrompt_Cancel_HistoryAndMasking()
+    {
+        const string secret = "L3vel-Secret-Canary";
+        var hash = new TechConnect.Server.Authentication.Local.OperatorPasswordHasher().HashEnableSecret("Other-Level-Secret");
+        var before = _fixture.ReadFile();
+        await using var cli = await CliHarness.StartAsync(_service, _audit, Level(15));
+
+        await cli.WaitForAsync("TechConnect#");
+        await cli.SendAndWaitAsync("configure terminal", "TechConnect(config)#");
+        await cli.SendAndWaitAsync("authentication", "TechConnect(config-auth)#");
+        await cli.SendAndWaitAsync("local", "TechConnect(config-auth-local)#");
+        await cli.SendAndWaitAsync("enable-secret-level 6", "Enter secret: ");
+        await cli.SendRawAsync("zq-abort\u0003");
+        await cli.WaitForAsync("% Cancelled. 'enable-secret-level 6' was not created.");
+        await cli.WaitForAsync("TechConnect(config-auth-local)#", 2);
+        await cli.SendAndWaitAsync("enable-secret-level 5", "Enter secret: ", 2);
+        await cli.SendAndWaitAsync(secret, "Confirm secret: ");
+        await cli.SendAndWaitAsync(secret, "TechConnect(config-auth-local)#", 3);
+        await cli.SendAndWaitAsync("enable-secret-level 7 hash " + hash, "TechConnect(config-auth-local)#", 4);
+        await cli.SendRawAsync("\u001b[A");
+        await cli.WaitForAsync("enable-secret-level 5", 2);
+        await cli.SendRawAsync("\u0015");
+        await cli.SendAndWaitAsync("do show candidate-config", "enable-secret-level 7 <hidden>");
+
+        cli.Output.Should().Contain("enable-secret-level 5 <hidden>").And.NotContain("enable-secret-level 6 ")
+            .And.NotContain("TechConnect(config-enable)#");
+        cli.Count(hash).Should().Be(1, "only the typed echo; the hash line was dropped from history and is masked in views");
+        cli.Output.Should().NotContain(secret).And.NotContain("zq-abort");
+        _fixture.ReadFile().Should().Be(before, "nothing is persisted without write");
+        _logger.AllText.Should().NotContain(secret).And.NotContain(hash);
+        AuditText().Should().NotContain(secret).And.NotContain(hash);
+        await cli.SendAndWaitAsync("end", "TechConnect#", 2);
+        cli.Output.Should().Contain(ConfigurationModeProcessor.DiscardedMessage);
     }
 
     /// <summary>Enters configuration mode and navigates to the RADIUS primary-server sub-mode.</summary>
